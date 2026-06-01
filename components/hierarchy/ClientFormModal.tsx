@@ -12,12 +12,8 @@ import {
 } from "@/components/ui/form";
 import { useToast } from "@/components/ui/Toast";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
-import {
-  CLIENT_TYPE_LABEL,
-  type ClientType,
-  type Region,
-} from "@/types/database";
-import type { ClientWithCount } from "./HierarchyBrowser";
+import { CLIENT_TYPE_LABEL, type ClientType } from "@/types/database";
+import type { Client } from "@/types/database";
 
 const TYPE_OPTIONS: Array<{ value: ClientType; label: string }> = [
   { value: "single_post", label: CLIENT_TYPE_LABEL.single_post },
@@ -25,15 +21,11 @@ const TYPE_OPTIONS: Array<{ value: ClientType; label: string }> = [
 ];
 
 export function ClientFormModal({
-  regions,
-  defaultRegionId,
   initialClient,
   onClose,
   onSaved,
 }: {
-  regions: Region[];
-  defaultRegionId: string;
-  initialClient: ClientWithCount | null;
+  initialClient: Client | null;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -41,9 +33,6 @@ export function ClientFormModal({
   const [name, setName] = useState(initialClient?.name ?? "");
   const [type, setType] = useState<ClientType>(
     initialClient?.type ?? "single_post",
-  );
-  const [regionId, setRegionId] = useState(
-    initialClient?.region_id ?? defaultRegionId ?? regions[0]?.id ?? "",
   );
   const [industry, setIndustry] = useState(initialClient?.industry ?? "");
   const [conglomerate, setConglomerate] = useState(
@@ -59,17 +48,12 @@ export function ClientFormModal({
       setErrorMessage("Name is required");
       return;
     }
-    if (!regionId) {
-      setErrorMessage("Region is required");
-      return;
-    }
     setSaving(true);
     setErrorMessage(null);
 
     const payload = {
       name: name.trim(),
       type,
-      region_id: regionId,
       industry: industry.trim() ? industry.trim() : null,
       conglomerate: conglomerate.trim() ? conglomerate.trim() : null,
     };
@@ -110,16 +94,6 @@ export function ClientFormModal({
             value={type}
             onChange={(v) => setType(v as ClientType)}
             options={TYPE_OPTIONS}
-            disabled={saving}
-          />
-        </Field>
-
-        <Field label="Region" htmlFor="client-region">
-          <SelectInput
-            id="client-region"
-            value={regionId}
-            onChange={setRegionId}
-            options={regions.map((r) => ({ value: r.id, label: r.name }))}
             disabled={saving}
           />
         </Field>

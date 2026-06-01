@@ -11,8 +11,8 @@ type NavItem = {
 };
 
 const navItems: NavItem[] = [
-  { label: "Hierarchy", href: "/hierarchy" },
-  { label: "Inventory", href: "/inventory" },
+  { label: "Guard Deployment", href: "/hierarchy" },
+  { label: "Inventory Management", href: "/inventory" },
   { label: "Compliance Board", href: "/compliance" },
 ];
 

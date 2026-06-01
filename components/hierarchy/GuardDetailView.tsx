@@ -10,7 +10,7 @@ import { GuardInventoryPanel } from "@/components/inventory/GuardInventoryPanel"
 import { GlassCard } from "@/components/ui/GlassCard";
 import { useToast } from "@/components/ui/Toast";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
-import type { Client, Guard, Region } from "@/types/database";
+import type { Client, Guard } from "@/types/database";
 
 type Tab = "details" | "inventory" | "compliance";
 
@@ -35,11 +35,11 @@ const secondaryButtonStyle: CSSProperties = {
 export function GuardDetailView({
   guard,
   client,
-  region,
+  clients,
 }: {
   guard: Guard;
   client: Client | null;
-  region: Region | null;
+  clients: Client[];
 }) {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<Tab>("details");
@@ -66,7 +66,7 @@ export function GuardDetailView({
 
   return (
     <div style={{ maxWidth: 860 }}>
-      <Breadcrumb guard={guard} client={client} region={region} />
+      <Breadcrumb guard={guard} client={client} />
 
       <div
         style={{
@@ -123,7 +123,7 @@ export function GuardDetailView({
       <div style={{ height: 20 }} />
 
       {activeTab === "details" ? (
-        <DetailsTab guard={guard} client={client} region={region} />
+        <DetailsTab guard={guard} client={client} />
       ) : null}
       {activeTab === "inventory" ? (
         <GuardInventoryPanel guardId={guard.id} guardName={guard.full_name} />
@@ -141,6 +141,7 @@ export function GuardDetailView({
         <GuardFormModal
           clientId={guard.client_id}
           initialGuard={guard}
+          clients={clients}
           onClose={() => setEditing(false)}
           onSaved={() => {
             setEditing(false);
@@ -155,11 +156,9 @@ export function GuardDetailView({
 function Breadcrumb({
   guard,
   client,
-  region,
 }: {
   guard: Guard;
   client: Client | null;
-  region: Region | null;
 }) {
   return (
     <div
@@ -176,10 +175,8 @@ function Breadcrumb({
         href="/hierarchy"
         style={{ color: "rgba(245, 245, 247, 0.6)", textDecoration: "none" }}
       >
-        Hierarchy
+        Guard Deployment
       </Link>
-      <span aria-hidden>/</span>
-      <span>{region ? region.name : "—"}</span>
       <span aria-hidden>/</span>
       {client ? (
         <Link
@@ -259,11 +256,9 @@ function Tabs({
 function DetailsTab({
   guard,
   client,
-  region,
 }: {
   guard: Guard;
   client: Client | null;
-  region: Region | null;
 }) {
   return (
     <GlassCard>
@@ -284,7 +279,6 @@ function DetailsTab({
           value={<GuardStatusBadge status={guard.status} />}
         />
         <DetailItem label="Client" value={client?.name ?? "—"} />
-        <DetailItem label="Region" value={region?.name ?? "—"} />
       </div>
 
       <div

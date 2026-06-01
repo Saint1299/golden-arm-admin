@@ -7,9 +7,19 @@ type ModalProps = {
   onClose: () => void;
   children: ReactNode;
   maxWidth?: number;
+  // Optional fixed footer. When provided, the body scrolls and this stays
+  // pinned at the bottom of the card so the primary action is always in
+  // reach even with a tall form on a short viewport.
+  footer?: ReactNode;
 };
 
-export function Modal({ title, onClose, children, maxWidth = 480 }: ModalProps) {
+export function Modal({
+  title,
+  onClose,
+  children,
+  maxWidth = 480,
+  footer,
+}: ModalProps) {
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
@@ -32,7 +42,6 @@ export function Modal({ title, onClose, children, maxWidth = 480 }: ModalProps) 
         alignItems: "center",
         justifyContent: "center",
         padding: 24,
-        overflowY: "auto",
         animation: "modal-overlay-in 200ms ease-out",
       }}
     >
@@ -42,6 +51,9 @@ export function Modal({ title, onClose, children, maxWidth = 480 }: ModalProps) 
           position: "relative",
           width: "100%",
           maxWidth,
+          maxHeight: "90vh",
+          display: "flex",
+          flexDirection: "column",
           backgroundColor: "rgba(255, 255, 255, 0.05)",
           backdropFilter: "blur(20px) saturate(180%)",
           WebkitBackdropFilter: "blur(20px) saturate(180%)",
@@ -49,24 +61,56 @@ export function Modal({ title, onClose, children, maxWidth = 480 }: ModalProps) 
           borderRadius: 16,
           boxShadow:
             "0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 0 rgba(255, 255, 255, 0.06)",
-          padding: 32,
           animation: "modal-card-in 250ms ease-out",
         }}
       >
-        <CloseButton onClose={onClose} />
-        <h2
+        {/* Header (fixed) */}
+        <div
           style={{
-            fontSize: 20,
-            fontWeight: 600,
-            letterSpacing: "-0.02em",
-            color: "#f5f5f7",
-            marginRight: 32,
+            position: "relative",
+            padding: "28px 32px 16px",
+            flexShrink: 0,
           }}
         >
-          {title}
-        </h2>
-        <div style={{ height: 24 }} />
-        {children}
+          <CloseButton onClose={onClose} />
+          <h2
+            style={{
+              fontSize: 20,
+              fontWeight: 600,
+              letterSpacing: "-0.02em",
+              color: "#f5f5f7",
+              marginRight: 32,
+            }}
+          >
+            {title}
+          </h2>
+        </div>
+
+        {/* Body (scrollable) — min-height: 0 so flex lets it shrink below
+            content size, which is what enables the overflow scroll. */}
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            overflowY: "auto",
+            padding: "8px 32px 24px",
+          }}
+        >
+          {children}
+        </div>
+
+        {/* Footer (fixed) — optional */}
+        {footer ? (
+          <div
+            style={{
+              flexShrink: 0,
+              padding: "16px 32px 24px",
+              borderTop: "1px solid rgba(255, 255, 255, 0.06)",
+            }}
+          >
+            {footer}
+          </div>
+        ) : null}
       </div>
     </div>
   );

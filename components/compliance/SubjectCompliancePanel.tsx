@@ -13,6 +13,7 @@ import { DocumentFormModal } from "./DocumentFormModal";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { useToast } from "@/components/ui/Toast";
 import { ALERT_ACCENT, computeAlertStatus, daysRemaining } from "@/lib/compliance";
+import { openComplianceFile } from "@/lib/compliance-storage";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import {
   type AlertStatus,
@@ -361,9 +362,7 @@ function DocRow({
         <DocMeta doc={doc} days={days} accentColor={accent.fg} />
       </div>
       <div style={{ display: "flex", gap: 12, flexShrink: 0 }}>
-        {doc.file_url ? (
-          <ExternalLink href={doc.file_url} />
-        ) : null}
+        {doc.file_url ? <FileAction fileUrl={doc.file_url} /> : null}
         <RowAction label="Edit" onClick={onEdit} />
         <RowAction label="Delete" onClick={onDelete} danger />
       </div>
@@ -426,25 +425,52 @@ function DocMeta({
   );
 }
 
-function ExternalLink({ href }: { href: string }) {
+function FileAction({ fileUrl }: { fileUrl: string }) {
   const [hover, setHover] = useState(false);
+  const { showToast } = useToast();
+  async function handleClick() {
+    const supabase = createSupabaseClient();
+    const { error } = await openComplianceFile(supabase, fileUrl);
+    if (error) showToast(error, "error");
+  }
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
+    <button
+      type="button"
+      onClick={handleClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      aria-label="View file"
+      title="View file"
       style={{
+        background: "transparent",
+        border: "none",
+        padding: 0,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
         fontSize: 12,
         fontWeight: 500,
-        color: hover ? "#c9a961" : "rgba(245, 245, 247, 0.55)",
-        textDecoration: "none",
+        fontFamily: "inherit",
+        cursor: "pointer",
+        color: hover ? "#d4b670" : "rgba(245, 245, 247, 0.55)",
         transition: "color 150ms ease-out",
       }}
     >
-      File ↗
-    </a>
+      <svg
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden
+      >
+        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+      </svg>
+      File
+    </button>
   );
 }
 

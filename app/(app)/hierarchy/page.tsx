@@ -1,23 +1,18 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
-import { HierarchyBrowser } from "@/components/hierarchy/HierarchyBrowser";
-import type { ClientWithCount } from "@/components/hierarchy/HierarchyBrowser";
+import {
+  GuardDeploymentTable,
+  type GuardDeploymentRow,
+} from "@/components/hierarchy/GuardDeploymentTable";
 import { createClient } from "@/lib/supabase/server";
-import type { Region } from "@/types/database";
+import type { Client, Guard } from "@/types/database";
 
 export const metadata: Metadata = {
-  title: "Hierarchy · Golden Arm Admin",
+  title: "Guard Deployment · Golden Arm Admin",
 };
 
-type ClientRow = {
-  id: string;
-  region_id: string;
-  name: string;
-  type: ClientWithCount["type"];
-  industry: string | null;
-  conglomerate: string | null;
-  created_at: string;
-  guards: { count: number }[];
+type RawGuardRow = Guard & {
+  client: Pick<Client, "id" | "name" | "type"> | null;
 };
 
 export default async function HierarchyPage() {
@@ -28,27 +23,42 @@ export default async function HierarchyPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [regionsRes, clientsRes] = await Promise.all([
-    supabase.from("regions").select("*").order("name", { ascending: true }),
+  // Single fetch joins each guard with its client; the page groups by client
+  // client-side. Clients are fetched in parallel for the filter chips and
+  // the modal pickers.
+  const [guardsRes, clientsRes] = await Promise.all([
+    supabase
+      .from("guards")
+      .select("*, client:clients(id, name, type)")
+      .order("full_name", { ascending: true }),
     supabase
       .from("clients")
-      .select("*, guards(count)")
+      .select("*")
       .order("name", { ascending: true }),
   ]);
 
-  const regions = (regionsRes.data ?? []) as Region[];
-  const clients: ClientWithCount[] = ((clientsRes.data ?? []) as ClientRow[]).map(
-    (c) => ({
-      id: c.id,
-      region_id: c.region_id,
-      name: c.name,
-      type: c.type,
-      industry: c.industry,
-      conglomerate: c.conglomerate,
-      created_at: c.created_at,
-      guard_count: c.guards?.[0]?.count ?? 0,
-    }),
-  );
+  const rows: GuardDeploymentRow[] = (
+    (guardsRes.data ?? []) as RawGuardRow[]
+  ).map((g) => ({
+    id: g.id,
+    client_id: g.client_id,
+    client_name: g.client?.name ?? "Unknown client",
+    client_type: g.client?.type ?? "single_post",
+    org_node_id: g.org_node_id,
+    full_name: g.full_name,
+    employee_no: g.employee_no,
+    sosia_license: g.sosia_license,
+    contact_no: g.contact_no,
+    date_deployed: g.date_deployed,
+    status: g.status,
+    notes: g.notes,
+    created_at: g.created_at,
+  }));
 
-  return <HierarchyBrowser initialRegions={regions} initialClients={clients} />;
+  return (
+    <GuardDeploymentTable
+      initialRows={rows}
+      clients={(clientsRes.data ?? []) as Client[]}
+    />
+  );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Modal } from "@/components/ui/Modal";
 import {
   CancelButton,
@@ -15,6 +15,7 @@ import { useToast } from "@/components/ui/Toast";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import {
   GUARD_STATUS_LABEL,
+  type Client,
   type Guard,
   type GuardStatus,
 } from "@/types/database";
@@ -24,19 +25,31 @@ const STATUS_OPTIONS: Array<{ value: GuardStatus; label: string }> = (
 ).map((s) => ({ value: s, label: GUARD_STATUS_LABEL[s] }));
 
 export function GuardFormModal({
-  clientId,
+  clientId: presetClientId,
   initialGuard,
+  clients,
   onClose,
   onSaved,
 }: {
-  clientId: string;
+  // null = the form must collect a client choice (no calling-page context).
+  // string = the form locks the client to this id and just adds the guard
+  // under it (used from /hierarchy/clients/[id]'s "Add guard for this client").
+  clientId: string | null;
   initialGuard: Guard | null;
+  clients: Client[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const isEditing = Boolean(initialGuard);
+  const { showToast } = useToast();
+
+  const [clientId, setClientId] = useState<string>(
+    initialGuard?.client_id ?? presetClientId ?? "",
+  );
   const [fullName, setFullName] = useState(initialGuard?.full_name ?? "");
-  const [employeeNo, setEmployeeNo] = useState(initialGuard?.employee_no ?? "");
+  const [employeeNo, setEmployeeNo] = useState(
+    initialGuard?.employee_no ?? "",
+  );
   const [sosiaLicense, setSosiaLicense] = useState(
     initialGuard?.sosia_license ?? "",
   );
@@ -50,12 +63,21 @@ export function GuardFormModal({
   const [notes, setNotes] = useState(initialGuard?.notes ?? "");
   const [saving, setSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const { showToast } = useToast();
+
+  const clientById = useMemo(() => {
+    const m = new Map<string, Client>();
+    for (const c of clients) m.set(c.id, c);
+    return m;
+  }, [clients]);
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!fullName.trim()) {
-      setErrorMessage("Full name is required");
+      setErrorMessage("Full name is required.");
+      return;
+    }
+    if (!clientId) {
+      setErrorMessage("Pick a client.");
       return;
     }
     setSaving(true);
@@ -88,9 +110,39 @@ export function GuardFormModal({
     onSaved();
   }
 
+  const clientLocked = !isEditing && presetClientId !== null;
+  const lockedClient = clientLocked ? clientById.get(presetClientId!) : null;
+
+  const clientOptions = useMemo(
+    () => clients.map((c) => ({ value: c.id, label: c.name })),
+    [clients],
+  );
+
   return (
     <Modal title={isEditing ? "Edit guard" : "Add guard"} onClose={onClose}>
       <form onSubmit={handleSubmit}>
+        {clientLocked ? (
+          <Field label="Client">
+            <ReadOnlyValue>{lockedClient?.name ?? "—"}</ReadOnlyValue>
+          </Field>
+        ) : (
+          <Field label="Client" htmlFor="guard-client">
+            <SelectInput
+              id="guard-client"
+              value={clientId}
+              onChange={(v) => {
+                setClientId(v);
+                setErrorMessage(null);
+              }}
+              options={[
+                { value: "", label: "Pick a client" },
+                ...clientOptions,
+              ]}
+              disabled={saving || clients.length === 0}
+            />
+          </Field>
+        )}
+
         <Field label="Full name" htmlFor="guard-name">
           <TextInput
             id="guard-name"
@@ -99,7 +151,7 @@ export function GuardFormModal({
             placeholder="e.g. Juan Dela Cruz"
             required
             disabled={saving}
-            autoFocus
+            autoFocus={isEditing}
           />
         </Field>
 
@@ -186,5 +238,22 @@ export function GuardFormModal({
         </div>
       </form>
     </Modal>
+  );
+}
+
+function ReadOnlyValue({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        padding: "10px 14px",
+        backgroundColor: "rgba(255, 255, 255, 0.03)",
+        border: "1px solid rgba(255, 255, 255, 0.06)",
+        borderRadius: 8,
+        color: "rgba(245, 245, 247, 0.85)",
+        fontSize: 14,
+      }}
+    >
+      {children}
+    </div>
   );
 }

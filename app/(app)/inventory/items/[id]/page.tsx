@@ -5,10 +5,22 @@ import {
   type HistoryEntry,
 } from "@/components/inventory/InventoryItemDetailView";
 import { createClient } from "@/lib/supabase/server";
-import type { InventoryItem } from "@/types/database";
+import type {
+  InventoryItem,
+  ItemCategory,
+  ItemType,
+} from "@/types/database";
 
 export const metadata: Metadata = {
   title: "Item · Golden Arm Admin",
+};
+
+type RawItem = InventoryItem & {
+  item_type:
+    | (ItemType & {
+        category: ItemCategory | null;
+      })
+    | null;
 };
 
 type RawHistoryRow = {
@@ -37,11 +49,13 @@ export default async function ItemDetailRoute({
 
   const { data: item, error: itemErr } = await supabase
     .from("inventory_items")
-    .select("*")
+    .select("*, item_type:item_types(*, category:item_categories(*))")
     .eq("id", id)
     .maybeSingle();
 
   if (itemErr || !item) notFound();
+
+  const typedItem = item as RawItem;
 
   const { data: history } = await supabase
     .from("guard_inventory")
@@ -63,7 +77,9 @@ export default async function ItemDetailRoute({
 
   return (
     <InventoryItemDetailView
-      item={item as InventoryItem}
+      item={typedItem}
+      itemType={typedItem.item_type ?? null}
+      category={typedItem.item_type?.category ?? null}
       initialHistory={historyEntries}
     />
   );

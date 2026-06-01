@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
 import { GuardDetailView } from "@/components/hierarchy/GuardDetailView";
 import { createClient } from "@/lib/supabase/server";
-import type { Client, Guard, Region } from "@/types/database";
+import type { Client, Guard } from "@/types/database";
 
 export const metadata: Metadata = {
   title: "Guard · Golden Arm Admin",
@@ -21,37 +21,21 @@ export default async function GuardDetailRoute({
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const { data: guard, error: guardErr } = await supabase
-    .from("guards")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle();
+  const [guardRes, clientsRes] = await Promise.all([
+    supabase.from("guards").select("*").eq("id", id).maybeSingle(),
+    supabase.from("clients").select("*").order("name", { ascending: true }),
+  ]);
 
-  if (guardErr || !guard) notFound();
-
-  const typedGuard = guard as Guard;
-
-  const { data: client } = await supabase
-    .from("clients")
-    .select("*")
-    .eq("id", typedGuard.client_id)
-    .maybeSingle();
-
-  const typedClient = (client as Client | null) ?? null;
-
-  const { data: region } = typedClient
-    ? await supabase
-        .from("regions")
-        .select("*")
-        .eq("id", typedClient.region_id)
-        .maybeSingle()
-    : { data: null };
+  if (guardRes.error || !guardRes.data) notFound();
+  const typedGuard = guardRes.data as Guard;
+  const clients = (clientsRes.data ?? []) as Client[];
+  const client = clients.find((c) => c.id === typedGuard.client_id) ?? null;
 
   return (
     <GuardDetailView
       guard={typedGuard}
-      client={typedClient}
-      region={(region as Region | null) ?? null}
+      client={client}
+      clients={clients}
     />
   );
 }

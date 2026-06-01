@@ -2,17 +2,10 @@
 // yxtzqlxjjxwswkuixrdx). Matches the accounting app's types/database.ts
 // convention. No `updated_at` columns exist on these tables.
 
-export type Region = {
-  id: string;
-  name: string;
-  created_at: string;
-};
-
 export type ClientType = "single_post" | "pooled";
 
 export type Client = {
   id: string;
-  region_id: string;
   name: string;
   type: ClientType;
   industry: string | null;
@@ -73,10 +66,35 @@ export type InventoryStatus = "available" | "issued" | "maintenance" | "retired"
 export type InventoryItem = {
   id: string;
   name: string;
+  // Legacy enum column — kept nullable-in-spirit for backward compat. New
+  // writes go through item_type_id; reads fall back to this label when an
+  // older row has no item_type_id.
   category: InventoryCategory;
   serial_no: string | null;
   status: InventoryStatus;
   notes: string | null;
+  created_at: string;
+  item_type_id: string | null;
+  asset_code: string | null;
+  date_acquired: string | null;
+};
+
+export type ItemCategory = {
+  id: string;
+  code: string;
+  name: string;
+  description: string | null;
+  sort_order: number;
+  created_at: string;
+};
+
+export type ItemType = {
+  id: string;
+  category_id: string;
+  code: string;
+  name: string;
+  description: string | null;
+  sort_order: number;
   created_at: string;
 };
 
@@ -157,7 +175,10 @@ export type ComplianceBoardRow = {
   alert_status: AlertStatus | null;
   guard_name: string | null;
   client_name: string | null;
-  region_name: string | null;
+  // Not exposed by the compliance_board view (which carries only the
+  // computed columns). The page/refetch joins it in from the underlying
+  // documents table so the board card can show its file action.
+  file_url: string | null;
 };
 
 export const DOCUMENT_SCOPE_LABEL: Record<DocumentScope, string> = {

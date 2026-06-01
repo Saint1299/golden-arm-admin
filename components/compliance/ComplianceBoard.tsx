@@ -13,13 +13,13 @@ import { GlassCard } from "@/components/ui/GlassCard";
 import { SelectInput, TextInput } from "@/components/ui/form";
 import { useToast } from "@/components/ui/Toast";
 import { ALERT_ACCENT } from "@/lib/compliance";
+import { openComplianceFile } from "@/lib/compliance-storage";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import {
   DOCUMENT_SCOPE_LABEL,
   type AlertStatus,
   type ApiDocument,
   type ComplianceBoardRow,
-  type Region,
 } from "@/types/database";
 
 const addButtonStyle: CSSProperties = {
@@ -53,14 +53,11 @@ const SCOPE_FILTER_OPTIONS = [
 
 export function ComplianceBoard({
   initialRows,
-  regions,
 }: {
   initialRows: ComplianceBoardRow[];
-  regions: Region[];
 }) {
   const [rows, setRows] = useState<ComplianceBoardRow[]>(initialRows);
   const [scopeFilter, setScopeFilter] = useState<string>("all");
-  const [regionFilter, setRegionFilter] = useState<string>("all");
   const [search, setSearch] = useState("");
   const [modal, setModal] = useState<
     | { mode: "add" }
@@ -72,37 +69,40 @@ export function ComplianceBoard({
 
   const refetch = useCallback(async () => {
     const supabase = createSupabaseClient();
-    const { data } = await supabase
-      .from("compliance_board")
-      .select("*")
-      .in("scope", ["company", "client"])
-      .order("expiry_date", { ascending: true, nullsFirst: false });
-    setRows((data ?? []) as ComplianceBoardRow[]);
+    const [boardRes, docsRes] = await Promise.all([
+      supabase
+        .from("compliance_board")
+        .select("*")
+        .in("scope", ["company", "client"])
+        .order("expiry_date", { ascending: true, nullsFirst: false }),
+      supabase
+        .from("documents")
+        .select("id, file_url")
+        .in("scope", ["company", "client"]),
+    ]);
+    const fileUrlById = new Map<string, string | null>();
+    for (const d of (docsRes.data ?? []) as Array<{
+      id: string;
+      file_url: string | null;
+    }>) {
+      fileUrlById.set(d.id, d.file_url);
+    }
+    const next: ComplianceBoardRow[] = (
+      (boardRes.data ?? []) as Omit<ComplianceBoardRow, "file_url">[]
+    ).map((r) => ({ ...r, file_url: fileUrlById.get(r.id) ?? null }));
+    setRows(next);
   }, []);
-
-  const regionOptions = useMemo(
-    () => [
-      { value: "all", label: "All regions" },
-      ...regions.map((r) => ({ value: r.name, label: r.name })),
-    ],
-    [regions],
-  );
-
-  const regionFilterApplies = scopeFilter === "guard" || scopeFilter === "client";
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return rows.filter((r) => {
       if (scopeFilter !== "all" && r.scope !== scopeFilter) return false;
-      if (regionFilterApplies && regionFilter !== "all") {
-        if (r.region_name !== regionFilter) return false;
-      }
       if (q) {
         if (!r.doc_type.toLowerCase().includes(q)) return false;
       }
       return true;
     });
-  }, [rows, scopeFilter, regionFilter, regionFilterApplies, search]);
+  }, [rows, scopeFilter, search]);
 
   const grouped = useMemo(() => {
     const expired: ComplianceBoardRow[] = [];
@@ -212,8 +212,7 @@ export function ComplianceBoard({
       <div
         style={{
           display: "grid",
-          gridTemplateColumns:
-            "minmax(220px, 1fr) minmax(180px, 240px) minmax(180px, 240px)",
+          gridTemplateColumns: "minmax(220px, 1fr) minmax(180px, 240px)",
           gap: 12,
           marginBottom: 20,
         }}
@@ -235,27 +234,6 @@ export function ComplianceBoard({
             onChange={setScopeFilter}
             options={SCOPE_FILTER_OPTIONS}
           />
-        </div>
-        <div>
-          <FilterLabel htmlFor="cb-region">Region</FilterLabel>
-          <SelectInput
-            id="cb-region"
-            value={regionFilter}
-            onChange={setRegionFilter}
-            options={regionOptions}
-            disabled={!regionFilterApplies}
-          />
-          {!regionFilterApplies ? (
-            <p
-              style={{
-                marginTop: 6,
-                fontSize: 11,
-                color: "rgba(245, 245, 247, 0.4)",
-              }}
-            >
-              Region applies only to guard / client scope.
-            </p>
-          ) : null}
         </div>
       </div>
 
@@ -506,8 +484,8 @@ function Section({
               style={{
                 display: "grid",
                 gridTemplateColumns:
-                  "repeat(auto-fill, minmax(300px, 1fr))",
-                gap: 14,
+                  "repeat(auto-fill, minmax(260px, 1fr))",
+                gap: 10,
               }}
             >
               {rows.map((row) => (
@@ -539,12 +517,26 @@ function DocCard({
   onDelete: () => void;
 }) {
   const [hover, setHover] = useState(false);
+  const { showToast } = useToast();
   const subject =
     row.scope === "guard"
       ? row.guard_name ?? "Unknown guard"
       : row.scope === "client"
         ? row.client_name ?? "Unknown client"
         : "Company";
+
+  // Single meta line: subject + doc number, omitting empties.
+  const metaParts = [
+    subject,
+    row.doc_number ?? null,
+  ].filter((v): v is string => Boolean(v));
+
+  async function handleViewFile() {
+    if (!row.file_url) return;
+    const supabase = createSupabaseClient();
+    const { error } = await openComplianceFile(supabase, row.file_url);
+    if (error) showToast(error, "error");
+  }
 
   return (
     <div
@@ -554,70 +546,59 @@ function DocCard({
         position: "relative",
         backgroundColor: accent.bg,
         border: `1px solid ${hover ? accent.fg : accent.border}`,
-        borderRadius: 12,
-        boxShadow:
-          "0 8px 24px rgba(0, 0, 0, 0.35), inset 0 1px 0 0 rgba(255, 255, 255, 0.04)",
-        padding: 16,
+        borderRadius: 10,
+        boxShadow: "0 4px 14px rgba(0, 0, 0, 0.28)",
+        padding: "11px 13px",
         transition: "border-color 200ms ease-out",
       }}
     >
       <div
         style={{
           display: "flex",
-          alignItems: "flex-start",
-          justifyContent: "space-between",
+          alignItems: "center",
           gap: 8,
+          minWidth: 0,
         }}
       >
         <h3
           style={{
             margin: 0,
-            fontSize: 14,
+            fontSize: 13.5,
             fontWeight: 600,
             color: "#f5f5f7",
             letterSpacing: "-0.01em",
-            wordBreak: "break-word",
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
           }}
+          title={row.doc_type}
         >
           {row.doc_type}
         </h3>
         <ScopeBadge scope={row.scope} />
       </div>
 
-      {row.doc_number ? (
+      {metaParts.length > 0 ? (
         <div
-          className="tabular"
           style={{
             marginTop: 4,
-            fontSize: 12,
+            fontSize: 11.5,
             color: "rgba(245, 245, 247, 0.55)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
           }}
+          title={metaParts.join(" · ")}
         >
-          {row.doc_number}
+          {metaParts.join(" · ")}
         </div>
       ) : null}
 
-      <div style={{ height: 10 }} />
-
       <div
         style={{
-          fontSize: 13,
-          color: "rgba(245, 245, 247, 0.8)",
-          fontWeight: 500,
-        }}
-      >
-        {subject}
-      </div>
-      {row.region_name ? (
-        <div style={{ fontSize: 11, color: "rgba(245, 245, 247, 0.5)" }}>
-          {row.region_name}
-        </div>
-      ) : null}
-
-      <div style={{ height: 12 }} />
-
-      <div
-        style={{
+          marginTop: 10,
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
@@ -626,13 +607,17 @@ function DocCard({
       >
         <div
           style={{
-            fontSize: 12,
+            fontSize: 11.5,
             color: "rgba(245, 245, 247, 0.6)",
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
           }}
         >
           {row.expiry_date ? (
             <>
-              Expires <span className="tabular">{row.expiry_date}</span>
+              <span className="tabular">{row.expiry_date}</span>
               {row.days_remaining !== null ? (
                 <>
                   {" · "}
@@ -648,9 +633,7 @@ function DocCard({
               ) : null}
             </>
           ) : (
-            <span style={{ color: "rgba(245, 245, 247, 0.4)" }}>
-              No expiry
-            </span>
+            <span style={{ color: "rgba(245, 245, 247, 0.4)" }}>No expiry</span>
           )}
         </div>
         {row.alert_status ? <AlertStatusBadge status={row.alert_status} /> : null}
@@ -658,18 +641,64 @@ function DocCard({
 
       <div
         style={{
-          marginTop: 12,
-          paddingTop: 10,
+          marginTop: 9,
+          paddingTop: 7,
           borderTop: "1px solid rgba(255, 255, 255, 0.06)",
           display: "flex",
           gap: 12,
           justifyContent: "flex-end",
         }}
       >
+        {row.file_url ? (
+          <FileAction onClick={handleViewFile} />
+        ) : null}
         <CardAction label="Edit" onClick={onEdit} />
         <CardAction label="Delete" onClick={onDelete} danger />
       </div>
     </div>
+  );
+}
+
+function FileAction({ onClick }: { onClick: () => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      aria-label="View file"
+      title="View file"
+      style={{
+        background: "transparent",
+        border: "none",
+        padding: 0,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        fontSize: 11.5,
+        fontWeight: 500,
+        fontFamily: "inherit",
+        cursor: "pointer",
+        color: hover ? "#d4b670" : "rgba(245, 245, 247, 0.55)",
+        transition: "color 150ms ease-out",
+      }}
+    >
+      <svg
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden
+      >
+        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+      </svg>
+      File
+    </button>
   );
 }
 

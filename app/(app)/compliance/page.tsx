@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { ComplianceBoard } from "@/components/compliance/ComplianceBoard";
 import { createClient } from "@/lib/supabase/server";
-import type { ComplianceBoardRow, Region } from "@/types/database";
+import type { ComplianceBoardRow } from "@/types/database";
 
 export const metadata: Metadata = {
   title: "Compliance · Golden Arm Admin",
@@ -20,19 +20,32 @@ export default async function CompliancePage() {
   // remaining with the same 30-day threshold our helper uses. This page is
   // strictly the company + client board — guard-scoped docs are managed via
   // the guard detail page's Compliance tab.
-  const [boardRes, regionsRes] = await Promise.all([
+  //
+  // The view doesn't carry file_url, so we fetch it from documents in
+  // parallel and merge into each row.
+  const [boardRes, docsRes] = await Promise.all([
     supabase
       .from("compliance_board")
       .select("*")
       .in("scope", ["company", "client"])
       .order("expiry_date", { ascending: true, nullsFirst: false }),
-    supabase.from("regions").select("*").order("name", { ascending: true }),
+    supabase
+      .from("documents")
+      .select("id, file_url")
+      .in("scope", ["company", "client"]),
   ]);
 
-  return (
-    <ComplianceBoard
-      initialRows={(boardRes.data ?? []) as ComplianceBoardRow[]}
-      regions={(regionsRes.data ?? []) as Region[]}
-    />
-  );
+  const fileUrlById = new Map<string, string | null>();
+  for (const d of (docsRes.data ?? []) as Array<{
+    id: string;
+    file_url: string | null;
+  }>) {
+    fileUrlById.set(d.id, d.file_url);
+  }
+
+  const rows: ComplianceBoardRow[] = (
+    (boardRes.data ?? []) as Omit<ComplianceBoardRow, "file_url">[]
+  ).map((r) => ({ ...r, file_url: fileUrlById.get(r.id) ?? null }));
+
+  return <ComplianceBoard initialRows={rows} />;
 }

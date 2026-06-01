@@ -1,14 +1,14 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
-import { ClientDetailView } from "@/components/hierarchy/ClientDetailView";
+import { OrgChartCanvas } from "@/components/hierarchy/OrgChartCanvas";
 import { createClient } from "@/lib/supabase/server";
-import type { Client, Guard } from "@/types/database";
+import type { Client, Guard, OrgNode } from "@/types/database";
 
 export const metadata: Metadata = {
-  title: "Client · Golden Arm Admin",
+  title: "Org chart · Golden Arm Admin",
 };
 
-export default async function ClientDetailRoute({
+export default async function OrgChartRoute({
   params,
 }: {
   params: Promise<{ id: string }>;
@@ -28,13 +28,15 @@ export default async function ClientDetailRoute({
     .maybeSingle();
 
   if (clientErr || !client) notFound();
-
   const typedClient = client as Client;
 
-  // All clients are fetched so the guard form modal can show its client
-  // picker when the user wants to re-target a guard during edit.
-  const [allClientsRes, guardsRes] = await Promise.all([
-    supabase.from("clients").select("*").order("name", { ascending: true }),
+  // Single round trip for everything the chart needs.
+  const [nodesRes, guardsRes] = await Promise.all([
+    supabase
+      .from("org_nodes")
+      .select("*")
+      .eq("client_id", id)
+      .order("sort_order", { ascending: true }),
     supabase
       .from("guards")
       .select("*")
@@ -43,9 +45,9 @@ export default async function ClientDetailRoute({
   ]);
 
   return (
-    <ClientDetailView
+    <OrgChartCanvas
       client={typedClient}
-      clients={(allClientsRes.data ?? []) as Client[]}
+      initialNodes={(nodesRes.data ?? []) as OrgNode[]}
       initialGuards={(guardsRes.data ?? []) as Guard[]}
     />
   );

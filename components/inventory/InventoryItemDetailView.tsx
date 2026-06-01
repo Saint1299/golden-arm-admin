@@ -8,12 +8,17 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { InventoryCategoryBadge, InventoryStatusBadge } from "./badges";
+import { InventoryStatusBadge } from "./badges";
 import { IssueItemModal } from "./IssueItemModal";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { useToast } from "@/components/ui/Toast";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
-import type { InventoryItem } from "@/types/database";
+import {
+  INVENTORY_CATEGORY_LABEL,
+  type InventoryItem,
+  type ItemCategory,
+  type ItemType,
+} from "@/types/database";
 
 export type HistoryEntry = {
   id: string;
@@ -89,9 +94,13 @@ const todayIso = () => {
 
 export function InventoryItemDetailView({
   item,
+  itemType,
+  category,
   initialHistory,
 }: {
   item: InventoryItem;
+  itemType: ItemType | null;
+  category: ItemCategory | null;
   initialHistory: HistoryEntry[];
 }) {
   const [history, setHistory] = useState<HistoryEntry[]>(initialHistory);
@@ -146,7 +155,7 @@ export function InventoryItemDetailView({
 
   return (
     <div style={{ maxWidth: 1000 }}>
-      <Breadcrumb itemName={item.name} />
+      <Breadcrumb itemName={item.asset_code ?? item.name} />
 
       <div
         style={{
@@ -166,20 +175,46 @@ export function InventoryItemDetailView({
               flexWrap: "wrap",
             }}
           >
-            <h1
+            {item.asset_code ? (
+              <h1
+                className="tabular"
+                style={{
+                  fontSize: 28,
+                  fontWeight: 600,
+                  letterSpacing: "0.02em",
+                  color: "#d4b670",
+                  margin: 0,
+                }}
+              >
+                {item.asset_code}
+              </h1>
+            ) : (
+              <h1
+                style={{
+                  fontSize: 28,
+                  fontWeight: 600,
+                  letterSpacing: "-0.02em",
+                  color: "#f5f5f7",
+                  margin: 0,
+                }}
+              >
+                {item.name}
+              </h1>
+            )}
+            <InventoryStatusBadge status={item.status} />
+          </div>
+          {item.asset_code ? (
+            <div
               style={{
-                fontSize: 28,
-                fontWeight: 600,
-                letterSpacing: "-0.02em",
+                marginTop: 6,
+                fontSize: 15,
+                fontWeight: 500,
                 color: "#f5f5f7",
-                margin: 0,
               }}
             >
               {item.name}
-            </h1>
-            <InventoryStatusBadge status={item.status} />
-            <InventoryCategoryBadge category={item.category} />
-          </div>
+            </div>
+          ) : null}
           <p
             style={{
               marginTop: 8,
@@ -254,12 +289,34 @@ export function InventoryItemDetailView({
             gap: "20px 32px",
           }}
         >
-          <DetailItem label="Name" value={item.name} />
+          <DetailItem
+            label="Asset code"
+            value={item.asset_code}
+            tabular
+          />
           <DetailItem
             label="Category"
-            value={<InventoryCategoryBadge category={item.category} />}
+            value={
+              category
+                ? `${category.code} — ${category.name}`
+                : INVENTORY_CATEGORY_LABEL[item.category] ?? null
+            }
           />
-          <DetailItem label="Serial no." value={item.serial_no} tabular />
+          <DetailItem
+            label="Item type"
+            value={itemType ? `${itemType.code} — ${itemType.name}` : null}
+          />
+          <DetailItem label="Name" value={item.name} />
+          <DetailItem
+            label="Manufacturer serial"
+            value={item.serial_no}
+            tabular
+          />
+          <DetailItem
+            label="Date acquired"
+            value={item.date_acquired}
+            tabular
+          />
           <DetailItem
             label="Status"
             value={<InventoryStatusBadge status={item.status} />}
@@ -372,7 +429,7 @@ function Breadcrumb({ itemName }: { itemName: string }) {
         href="/inventory"
         style={{ color: "rgba(245, 245, 247, 0.6)", textDecoration: "none" }}
       >
-        Inventory
+        Inventory Management
       </Link>
       <span aria-hidden>/</span>
       <span style={{ color: "rgba(245, 245, 247, 0.7)" }}>{itemName}</span>

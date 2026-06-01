@@ -3,6 +3,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type CSSProperties,
   type ReactNode,
@@ -18,6 +19,13 @@ import {
   TextInput,
 } from "@/components/ui/form";
 import { useToast } from "@/components/ui/Toast";
+import {
+  deleteComplianceFile,
+  displayNameFromFileUrl,
+  isHttpUrl,
+  openComplianceFile,
+  uploadComplianceFile,
+} from "@/lib/compliance-storage";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import {
   DOCUMENT_SCOPE_LABEL,
@@ -25,6 +33,14 @@ import {
   type ApiDocument,
   type DocumentScope,
 } from "@/types/database";
+
+// Canonical display order for the scope dropdown. Company comes first so
+// that when /compliance passes ['client','company'] the dropdown still
+// reads Company → Client (and Company is the default on a fresh add).
+const SCOPE_DISPLAY_ORDER: DocumentScope[] = ["company", "client", "guard"];
+
+const DOC_FORM_ID = "document-form";
+const DOC_TYPE_DATALIST_ID = "document-type-suggestions";
 
 type GuardOption = {
   id: string;
@@ -35,12 +51,7 @@ type GuardOption = {
 type ClientOption = {
   id: string;
   name: string;
-  region_id: string;
 };
-
-type RegionOption = { id: string; name: string };
-
-const DOC_TYPE_DATALIST_ID = "document-type-suggestions";
 
 export function DocumentFormModal({
   initialDoc,
@@ -54,14 +65,11 @@ export function DocumentFormModal({
 }: {
   initialDoc: ApiDocument | null;
   // Drives the scope control: a dropdown when length > 1, a read-only chip
-  // when length === 1 (the scope is locked). Required + non-empty.
-  //   /compliance add or edit (company/client only): ['client', 'company']
-  //   guard detail (add or edit):                    ['guard']
-  //   client detail (add or edit):                   ['client']
+  // when length === 1. Required + non-empty.
   allowedScopes: DocumentScope[];
-  // Subject locks — independent of the scope lock. Set on the "Add doc for
-  // this X" paths so the picker is replaced by a read-only name chip. Edits
-  // intentionally don't set these so the user can re-target the doc.
+  // Subject locks — independent of scope. When set, the subject picker is
+  // replaced by a read-only chip. Edits intentionally don't pass these so
+  // the user can re-target the doc within the locked scope.
   presetGuardId?: string;
   presetClientId?: string;
   presetGuardName?: string;
@@ -70,14 +78,23 @@ export function DocumentFormModal({
   onSaved: () => void;
 }) {
   const isEditing = Boolean(initialDoc);
-  const scopeLocked = allowedScopes.length === 1;
 
-  // Initial scope: prefer the doc's current scope (edit), else the first
-  // allowed. Snap back to allowed[0] if a caller hands us an out-of-set scope.
+  // Sort the caller's allowedScopes through the canonical display order so
+  // the dropdown always reads Company → Client → Guard regardless of how
+  // they were passed in.
+  const displayScopes = useMemo<DocumentScope[]>(
+    () => SCOPE_DISPLAY_ORDER.filter((s) => allowedScopes.includes(s)),
+    [allowedScopes],
+  );
+  const scopeLocked = displayScopes.length === 1;
+
+  // Initial scope: the doc's current scope if it's allowed (edit), otherwise
+  // the first of the canonical-order list — which means Company wins when
+  // both company + client are allowed on a fresh add.
   const initialScope: DocumentScope = (() => {
     const fromDoc = initialDoc?.scope;
-    if (fromDoc && allowedScopes.includes(fromDoc)) return fromDoc;
-    return allowedScopes[0] ?? "company";
+    if (fromDoc && displayScopes.includes(fromDoc)) return fromDoc;
+    return displayScopes[0] ?? "company";
   })();
   const [scope, setScope] = useState<DocumentScope>(initialScope);
   const [guardId, setGuardId] = useState<string | null>(
@@ -90,22 +107,36 @@ export function DocumentFormModal({
   const [docNumber, setDocNumber] = useState(initialDoc?.doc_number ?? "");
   const [issueDate, setIssueDate] = useState(initialDoc?.issue_date ?? "");
   const [expiryDate, setExpiryDate] = useState(initialDoc?.expiry_date ?? "");
-  const [fileUrl, setFileUrl] = useState(initialDoc?.file_url ?? "");
   const [notes, setNotes] = useState(initialDoc?.notes ?? "");
+
+  // File state — three exclusive signals:
+  //   existingFileUrl from initialDoc (storage path OR legacy http url)
+  //   stagedFile      a new File chosen — uploads on save
+  //   markedForRemoval edit-mode Remove was clicked — file_url goes to null
+  const existingFileUrl = initialDoc?.file_url ?? null;
+  const [stagedFile, setStagedFile] = useState<File | null>(null);
+  const [markedForRemoval, setMarkedForRemoval] = useState(false);
+
+  function selectFile(f: File | null) {
+    setStagedFile(f);
+    if (f) setMarkedForRemoval(false);
+  }
+  function markForRemoval(m: boolean) {
+    setMarkedForRemoval(m);
+    if (m) setStagedFile(null);
+  }
+
   const [saving, setSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const { showToast } = useToast();
 
-  // Loaded only when at least one picker can actually be shown — i.e. an
-  // allowed scope has no preset subject lock. Skipping the fetch when every
-  // possible subject is pre-locked keeps "Add doc for this X" snappy.
+  // Loaded only when at least one picker can actually be shown.
   const [guards, setGuards] = useState<GuardOption[] | null>(null);
   const [clients, setClients] = useState<ClientOption[] | null>(null);
-  const [regions, setRegions] = useState<RegionOption[] | null>(null);
   const [guardSearch, setGuardSearch] = useState("");
 
-  const needGuardPicker = allowedScopes.includes("guard") && !presetGuardId;
-  const needClientPicker = allowedScopes.includes("client") && !presetClientId;
+  const needGuardPicker = displayScopes.includes("guard") && !presetGuardId;
+  const needClientPicker = displayScopes.includes("client") && !presetClientId;
   const needPickers = needGuardPicker || needClientPicker;
 
   useEffect(() => {
@@ -113,7 +144,7 @@ export function DocumentFormModal({
     let active = true;
     (async () => {
       const supabase = createSupabaseClient();
-      const [guardsRes, clientsRes, regionsRes] = await Promise.all([
+      const [guardsRes, clientsRes] = await Promise.all([
         supabase
           .from("guards")
           .select("id, full_name, employee_no")
@@ -121,22 +152,18 @@ export function DocumentFormModal({
           .order("full_name", { ascending: true }),
         supabase
           .from("clients")
-          .select("id, name, region_id")
+          .select("id, name")
           .order("name", { ascending: true }),
-        supabase.from("regions").select("id, name").order("name", { ascending: true }),
       ]);
       if (!active) return;
       setGuards((guardsRes.data ?? []) as GuardOption[]);
       setClients((clientsRes.data ?? []) as ClientOption[]);
-      setRegions((regionsRes.data ?? []) as RegionOption[]);
     })();
     return () => {
       active = false;
     };
   }, [needPickers]);
 
-  // When scope changes mid-edit, clear the other subject id so we never
-  // submit an invalid combination (the DB CHECK would reject it anyway).
   function handleScopeChange(next: DocumentScope) {
     setScope(next);
     if (next !== "guard") setGuardId(null);
@@ -152,23 +179,6 @@ export function DocumentFormModal({
       `${g.full_name} ${g.employee_no ?? ""}`.toLowerCase().includes(q),
     );
   }, [guards, guardSearch]);
-
-  // Group clients by region for the optgroup select.
-  const clientGroups = useMemo(() => {
-    if (!clients || !regions) return [];
-    const byRegion = new Map<string, ClientOption[]>();
-    for (const c of clients) {
-      const arr = byRegion.get(c.region_id) ?? [];
-      arr.push(c);
-      byRegion.set(c.region_id, arr);
-    }
-    return regions
-      .map((r) => ({
-        regionName: r.name,
-        items: byRegion.get(r.id) ?? [],
-      }))
-      .filter((g) => g.items.length > 0);
-  }, [clients, regions]);
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -188,6 +198,51 @@ export function DocumentFormModal({
     setSaving(true);
     setErrorMessage(null);
 
+    const supabase = createSupabaseClient();
+
+    // 1. Resolve the file_url to write into the documents row. This may
+    //    involve uploading a new file and/or deleting the old one. Storage
+    //    ops run BEFORE the DB write so we never have a doc row that
+    //    references a non-existent storage object.
+    let resolvedFileUrl: string | null = existingFileUrl;
+
+    if (stagedFile) {
+      const upload = await uploadComplianceFile(supabase, scope, stagedFile);
+      if (upload.error || !upload.path) {
+        setErrorMessage(upload.error ?? "Upload failed");
+        showToast(upload.error ?? "Upload failed", "error");
+        setSaving(false);
+        return;
+      }
+      resolvedFileUrl = upload.path;
+      // Best-effort: clean up the previous storage object so the bucket
+      // doesn't accumulate orphans. Skip http URLs (they're not ours).
+      if (
+        existingFileUrl &&
+        !isHttpUrl(existingFileUrl) &&
+        existingFileUrl !== upload.path
+      ) {
+        const del = await deleteComplianceFile(supabase, existingFileUrl);
+        if (del.error) {
+          showToast(
+            `New file saved, but couldn’t remove the old one (${del.error})`,
+            "info",
+          );
+        }
+      }
+    } else if (markedForRemoval) {
+      resolvedFileUrl = null;
+      if (existingFileUrl && !isHttpUrl(existingFileUrl)) {
+        const del = await deleteComplianceFile(supabase, existingFileUrl);
+        if (del.error) {
+          showToast(
+            `Link cleared, but couldn’t delete file from storage (${del.error})`,
+            "info",
+          );
+        }
+      }
+    }
+
     const payload = {
       scope,
       guard_id: scope === "guard" ? guardId : null,
@@ -196,11 +251,10 @@ export function DocumentFormModal({
       doc_number: docNumber.trim() ? docNumber.trim() : null,
       issue_date: issueDate || null,
       expiry_date: expiryDate || null,
-      file_url: fileUrl.trim() ? fileUrl.trim() : null,
+      file_url: resolvedFileUrl,
       notes: notes.trim() ? notes.trim() : null,
     };
 
-    const supabase = createSupabaseClient();
     const { error } = initialDoc
       ? await supabase.from("documents").update(payload).eq("id", initialDoc.id)
       : await supabase.from("documents").insert(payload);
@@ -217,9 +271,26 @@ export function DocumentFormModal({
 
   const title = isEditing ? "Edit document" : "Add document";
 
+  // The submit button lives in the Modal's footer (so it stays pinned on
+  // short viewports) — link it back to the form via the form="..." HTML
+  // attribute.
+  const footer = (
+    <>
+      <FormError message={errorMessage} />
+      {errorMessage ? <div style={{ height: 12 }} /> : null}
+      <GoldButton type="submit" form={DOC_FORM_ID} disabled={saving}>
+        {saving ? "Saving…" : isEditing ? "Save document" : "Add document"}
+      </GoldButton>
+      <div style={{ height: 8 }} />
+      <div style={{ display: "flex", justifyContent: "center" }}>
+        <CancelButton onClick={onClose} disabled={saving} />
+      </div>
+    </>
+  );
+
   return (
-    <Modal title={title} onClose={onClose} maxWidth={560}>
-      <form onSubmit={handleSubmit}>
+    <Modal title={title} onClose={onClose} maxWidth={560} footer={footer}>
+      <form id={DOC_FORM_ID} onSubmit={handleSubmit}>
         {/* Scope */}
         {scopeLocked ? (
           <Field label="Scope">
@@ -231,7 +302,7 @@ export function DocumentFormModal({
               id="doc-scope"
               value={scope}
               onChange={(v) => handleScopeChange(v as DocumentScope)}
-              options={allowedScopes.map((s) => ({
+              options={displayScopes.map((s) => ({
                 value: s,
                 label: DOCUMENT_SCOPE_LABEL[s],
               }))}
@@ -240,8 +311,7 @@ export function DocumentFormModal({
           </Field>
         )}
 
-        {/* Subject picker — locked when preset*Id is provided (Add for this X),
-            picker otherwise (full add + all edits). */}
+        {/* Subject picker — locked when preset*Id is provided. */}
         {scope === "guard" ? (
           presetGuardId ? (
             <Field label="Guard">
@@ -279,8 +349,8 @@ export function DocumentFormModal({
             <Field label="Client" htmlFor="doc-client">
               <ClientPickerSelect
                 id="doc-client"
-                groups={clientGroups}
-                loading={clients === null || regions === null}
+                clients={clients ?? []}
+                loading={clients === null}
                 value={clientId ?? ""}
                 onChange={(v) => setClientId(v || null)}
                 disabled={saving}
@@ -360,17 +430,16 @@ export function DocumentFormModal({
         </div>
 
         <Field
-          label="File URL"
-          htmlFor="doc-url"
-          helper="Paste a link to the scan/PDF (uploads not supported in this milestone)."
+          label="File"
+          helper="Uploads go to the compliance-documents bucket; older docs may show a manually-pasted link."
         >
-          <TextInput
-            id="doc-url"
-            type="url"
-            value={fileUrl}
-            onChange={setFileUrl}
-            placeholder="https://…"
+          <FileUploadField
+            existingFileUrl={existingFileUrl}
+            stagedFile={stagedFile}
+            markedForRemoval={markedForRemoval}
             disabled={saving}
+            onSelect={selectFile}
+            onMarkForRemoval={markForRemoval}
           />
         </Field>
 
@@ -383,17 +452,6 @@ export function DocumentFormModal({
             disabled={saving}
           />
         </Field>
-
-        <FormError message={errorMessage} />
-
-        <div style={{ height: 24 }} />
-        <GoldButton type="submit" disabled={saving}>
-          {saving ? "Saving…" : isEditing ? "Save document" : "Add document"}
-        </GoldButton>
-        <div style={{ height: 12 }} />
-        <div style={{ display: "flex", justifyContent: "center" }}>
-          <CancelButton onClick={onClose} disabled={saving} />
-        </div>
       </form>
     </Modal>
   );
@@ -413,6 +471,291 @@ function ReadOnlyValue({ children }: { children: ReactNode }) {
     >
       {children}
     </div>
+  );
+}
+
+function FileUploadField({
+  existingFileUrl,
+  stagedFile,
+  markedForRemoval,
+  disabled,
+  onSelect,
+  onMarkForRemoval,
+}: {
+  existingFileUrl: string | null;
+  stagedFile: File | null;
+  markedForRemoval: boolean;
+  disabled: boolean;
+  onSelect: (f: File | null) => void;
+  onMarkForRemoval: (m: boolean) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const { showToast } = useToast();
+
+  function openPicker() {
+    if (disabled) return;
+    inputRef.current?.click();
+  }
+
+  function clearStaged() {
+    onSelect(null);
+    // Reset the input so the same file can be re-selected if the user
+    // changes their mind and chooses it again.
+    if (inputRef.current) inputRef.current.value = "";
+  }
+
+  async function handleOpenExisting() {
+    if (!existingFileUrl) return;
+    const supabase = createSupabaseClient();
+    const { error } = await openComplianceFile(supabase, existingFileUrl);
+    if (error) showToast(error, "error");
+  }
+
+  // State A: no existing, no staged → "Choose file"
+  // State B: no existing, staged → filename + Replace + Clear
+  // State C: existing, no staged, not removed → name + Open + Replace + Remove
+  // State D: existing, staged → "Replacing with X" + Cancel
+  // State E: existing, marked for removal → "Will remove" + Undo
+  const hasExisting = Boolean(existingFileUrl);
+  const existingDisplay = existingFileUrl
+    ? displayNameFromFileUrl(existingFileUrl)
+    : "";
+
+  const containerStyle: CSSProperties = {
+    padding: "12px 14px",
+    backgroundColor: "rgba(255, 255, 255, 0.03)",
+    border: "1px solid rgba(255, 255, 255, 0.08)",
+    borderRadius: 8,
+  };
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        onChange={(e) => onSelect(e.target.files?.[0] ?? null)}
+        disabled={disabled}
+        style={{ display: "none" }}
+      />
+
+      {!hasExisting && !stagedFile ? (
+        <button
+          type="button"
+          onClick={openPicker}
+          disabled={disabled}
+          style={{
+            ...containerStyle,
+            width: "100%",
+            border: "1px dashed rgba(255, 255, 255, 0.18)",
+            color: "rgba(245, 245, 247, 0.7)",
+            fontSize: 13,
+            fontFamily: "inherit",
+            cursor: disabled ? "not-allowed" : "pointer",
+            textAlign: "center",
+          }}
+        >
+          + Choose file…
+        </button>
+      ) : null}
+
+      {!hasExisting && stagedFile ? (
+        <div style={containerStyle}>
+          <FileLine
+            primary={stagedFile.name}
+            secondary={fileSizeDisplay(stagedFile)}
+            tone="staged"
+          />
+          <FileActions>
+            <FileActionButton label="Replace" onClick={openPicker} />
+            <FileActionButton label="Clear" onClick={clearStaged} danger />
+          </FileActions>
+        </div>
+      ) : null}
+
+      {hasExisting && !stagedFile && !markedForRemoval ? (
+        <div style={containerStyle}>
+          <FileLine
+            primary={existingDisplay}
+            secondary={existingFileUrl && isHttpUrl(existingFileUrl) ? "External link" : "Stored file"}
+            tone="existing"
+          />
+          <FileActions>
+            <FileActionButton label="Open" onClick={handleOpenExisting} accent />
+            <FileActionButton label="Replace" onClick={openPicker} />
+            <FileActionButton
+              label="Remove"
+              onClick={() => onMarkForRemoval(true)}
+              danger
+            />
+          </FileActions>
+        </div>
+      ) : null}
+
+      {hasExisting && stagedFile ? (
+        <div style={containerStyle}>
+          <FileLine
+            primary={stagedFile.name}
+            secondary={`Will replace ${existingDisplay} on save`}
+            tone="staged"
+          />
+          <FileActions>
+            <FileActionButton label="Cancel replace" onClick={clearStaged} />
+          </FileActions>
+        </div>
+      ) : null}
+
+      {hasExisting && markedForRemoval ? (
+        <div style={containerStyle}>
+          <FileLine
+            primary={existingDisplay}
+            secondary="Will be removed on save"
+            tone="warning"
+          />
+          <FileActions>
+            <FileActionButton label="Undo" onClick={() => onMarkForRemoval(false)} />
+          </FileActions>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function fileSizeDisplay(file: File): string {
+  if (file.size < 1024) return `${file.size} B`;
+  if (file.size < 1024 * 1024) return `${(file.size / 1024).toFixed(1)} KB`;
+  return `${(file.size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function FileLine({
+  primary,
+  secondary,
+  tone,
+}: {
+  primary: string;
+  secondary?: string;
+  tone: "staged" | "existing" | "warning";
+}) {
+  const primaryColor =
+    tone === "warning" ? "#fbbf24" : "#f5f5f7";
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        minWidth: 0,
+      }}
+    >
+      <PaperclipIcon />
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div
+          style={{
+            fontSize: 13,
+            fontWeight: 500,
+            color: primaryColor,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+          title={primary}
+        >
+          {primary}
+        </div>
+        {secondary ? (
+          <div
+            style={{
+              fontSize: 11,
+              color: "rgba(245, 245, 247, 0.5)",
+              marginTop: 2,
+            }}
+          >
+            {secondary}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function FileActions({ children }: { children: ReactNode }) {
+  return (
+    <div
+      style={{
+        marginTop: 10,
+        paddingTop: 8,
+        borderTop: "1px solid rgba(255, 255, 255, 0.06)",
+        display: "flex",
+        gap: 14,
+        justifyContent: "flex-end",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function FileActionButton({
+  label,
+  onClick,
+  danger,
+  accent,
+}: {
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+  accent?: boolean;
+}) {
+  const [hover, setHover] = useState(false);
+  const color = danger
+    ? hover
+      ? "#ef4444"
+      : "rgba(239, 68, 68, 0.7)"
+    : accent
+      ? hover
+        ? "#d4b670"
+        : "#c9a961"
+      : hover
+        ? "#f5f5f7"
+        : "rgba(245, 245, 247, 0.55)";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        background: "transparent",
+        border: "none",
+        padding: 0,
+        fontSize: 12,
+        fontWeight: 500,
+        fontFamily: "inherit",
+        cursor: "pointer",
+        color,
+        transition: "color 150ms ease-out",
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+function PaperclipIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="rgba(245, 245, 247, 0.55)"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      style={{ flexShrink: 0 }}
+    >
+      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+    </svg>
   );
 }
 
@@ -527,14 +870,14 @@ function GuardOptionRow({
 
 function ClientPickerSelect({
   id,
-  groups,
+  clients,
   loading,
   value,
   onChange,
   disabled,
 }: {
   id: string;
-  groups: Array<{ regionName: string; items: ClientOption[] }>;
+  clients: ClientOption[];
   loading: boolean;
   value: string;
   onChange: (v: string) => void;
@@ -572,14 +915,10 @@ function ClientPickerSelect({
         <option value="" style={{ background: "#080b12" }}>
           — Pick a client —
         </option>
-        {groups.map((g) => (
-          <optgroup key={g.regionName} label={g.regionName}>
-            {g.items.map((c) => (
-              <option key={c.id} value={c.id} style={{ background: "#080b12" }}>
-                {c.name}
-              </option>
-            ))}
-          </optgroup>
+        {clients.map((c) => (
+          <option key={c.id} value={c.id} style={{ background: "#080b12" }}>
+            {c.name}
+          </option>
         ))}
       </select>
       <svg

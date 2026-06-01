@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { InventoryCategoryBadge } from "./badges";
 import { Modal } from "@/components/ui/Modal";
 import {
   CancelButton,
@@ -87,7 +86,9 @@ export function IssueToGuardModal({
     const q = search.trim().toLowerCase();
     if (!q) return available;
     return available.filter((i) =>
-      `${i.name} ${i.serial_no ?? ""}`.toLowerCase().includes(q),
+      `${i.asset_code ?? ""} ${i.name} ${i.serial_no ?? ""}`
+        .toLowerCase()
+        .includes(q),
     );
   }, [available, search]);
 
@@ -256,10 +257,28 @@ function ItemOptionRow({
       }}
     >
       <span
-        style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0 }}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 10,
+          minWidth: 0,
+        }}
       >
+        {item.asset_code ? (
+          <span
+            className="tabular"
+            style={{
+              color: "#d4b670",
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: "0.04em",
+              flexShrink: 0,
+            }}
+          >
+            {item.asset_code}
+          </span>
+        ) : null}
         <span style={{ fontWeight: 500 }}>{item.name}</span>
-        <InventoryCategoryBadge category={item.category} />
       </span>
       <span
         className="tabular"

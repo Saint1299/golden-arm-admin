@@ -44,7 +44,7 @@ export default function DashboardPage() {
             lineHeight: 1.6,
           }}
         >
-          This is the foundation shell. Features for Hierarchy, Inventory, and
+          This is the foundation shell. Features for Guard Deployment, Inventory Management, and
           the Compliance Board will be added in upcoming milestones.
         </p>
       </GlassCard>

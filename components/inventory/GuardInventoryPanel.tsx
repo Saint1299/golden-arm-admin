@@ -2,21 +2,18 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
-import { InventoryCategoryBadge } from "./badges";
 import { IssueToGuardModal } from "./IssueToGuardModal";
 import { GlassCard } from "@/components/ui/GlassCard";
-import type {
-  InventoryCategory,
-  InventoryItem,
-} from "@/types/database";
+import type { InventoryItem, ItemType } from "@/types/database";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 
 type GuardLedgerEntry = {
   id: string;
   item_id: string;
   item_name: string;
-  item_category: InventoryCategory;
-  item_serial_no: string | null;
+  item_asset_code: string | null;
+  item_type_name: string | null;
+  item_type_code: string | null;
   issued_date: string;
   returned_date: string | null;
   notes: string | null;
@@ -28,7 +25,11 @@ type RawRow = {
   issued_date: string;
   returned_date: string | null;
   notes: string | null;
-  item: Pick<InventoryItem, "id" | "name" | "category" | "serial_no"> | null;
+  item:
+    | (Pick<InventoryItem, "id" | "name" | "asset_code"> & {
+        item_type: Pick<ItemType, "code" | "name"> | null;
+      })
+    | null;
 };
 
 const headerCellStyle: CSSProperties = {
@@ -84,7 +85,7 @@ export function GuardInventoryPanel({
     const { data } = await supabase
       .from("guard_inventory")
       .select(
-        "id, item_id, issued_date, returned_date, notes, item:inventory_items(id, name, category, serial_no)",
+        "id, item_id, issued_date, returned_date, notes, item:inventory_items(id, name, asset_code, item_type:item_types(code, name))",
       )
       .eq("guard_id", guardId)
       .order("issued_date", { ascending: false })
@@ -93,8 +94,9 @@ export function GuardInventoryPanel({
       id: r.id,
       item_id: r.item_id,
       item_name: r.item?.name ?? "Unknown item",
-      item_category: (r.item?.category ?? "other") as InventoryCategory,
-      item_serial_no: r.item?.serial_no ?? null,
+      item_asset_code: r.item?.asset_code ?? null,
+      item_type_name: r.item?.item_type?.name ?? null,
+      item_type_code: r.item?.item_type?.code ?? null,
       issued_date: r.issued_date,
       returned_date: r.returned_date,
       notes: r.notes,
@@ -240,9 +242,9 @@ function Section({
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr>
+                <th style={headerCellStyle}>Asset code</th>
                 <th style={headerCellStyle}>Item</th>
-                <th style={headerCellStyle}>Category</th>
-                <th style={headerCellStyle}>Serial</th>
+                <th style={headerCellStyle}>Type</th>
                 <th style={headerCellStyle}>Issued</th>
                 {showReturned ? (
                   <th style={headerCellStyle}>Returned</th>
@@ -253,6 +255,25 @@ function Section({
             <tbody>
               {entries.map((e) => (
                 <tr key={e.id}>
+                  <td style={bodyCellStyle} className="tabular">
+                    {e.item_asset_code ? (
+                      <Link
+                        href={`/inventory/items/${e.item_id}`}
+                        style={{
+                          color: "#d4b670",
+                          textDecoration: "none",
+                          letterSpacing: "0.02em",
+                          fontWeight: 500,
+                        }}
+                      >
+                        {e.item_asset_code}
+                      </Link>
+                    ) : (
+                      <span style={{ color: "rgba(245, 245, 247, 0.35)" }}>
+                        —
+                      </span>
+                    )}
+                  </td>
                   <td style={{ ...bodyCellStyle, color: "#f5f5f7" }}>
                     <Link
                       href={`/inventory/items/${e.item_id}`}
@@ -266,10 +287,7 @@ function Section({
                     </Link>
                   </td>
                   <td style={bodyCellStyle}>
-                    <InventoryCategoryBadge category={e.item_category} />
-                  </td>
-                  <td style={bodyCellStyle} className="tabular">
-                    {e.item_serial_no ?? "—"}
+                    {e.item_type_name ?? "—"}
                   </td>
                   <td style={bodyCellStyle} className="tabular">
                     {e.issued_date}

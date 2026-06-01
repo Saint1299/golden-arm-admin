@@ -231,12 +231,16 @@ export function GoldButton({
   disabled,
   onClick,
   fullWidth = true,
+  form,
 }: {
   children: ReactNode;
   type?: "submit" | "button";
   disabled?: boolean;
   onClick?: () => void;
   fullWidth?: boolean;
+  // Lets the button live outside its <form> (e.g. pinned in a Modal footer
+  // while the form lives in the scrollable body) and still submit it.
+  form?: string;
 }) {
   const [hover, setHover] = useState(false);
   return (
@@ -244,6 +248,7 @@ export function GoldButton({
       type={type}
       disabled={disabled}
       onClick={onClick}
+      form={form}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
