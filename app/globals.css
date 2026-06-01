@@ -1,0 +1,280 @@
+@import "tailwindcss";
+
+:root {
+  --bg-base: #080b12;
+  --surface-elevated: rgba(255, 255, 255, 0.03);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-hover: rgba(255, 255, 255, 0.14);
+  --text-primary: #f5f5f7;
+  --text-secondary: rgba(245, 245, 247, 0.6);
+  --text-tertiary: rgba(245, 245, 247, 0.4);
+  --accent-primary: #c9a961;
+  --accent-secondary: #6366f1;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (max-width: 768px) {
+  body {
+    font-size: 15px;
+  }
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.glass {
+  background: var(--surface-elevated);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--border-subtle);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+}
+
+@keyframes drift-1 {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    transform: translate3d(60px, 40px, 0) scale(1.08);
+  }
+}
+
+@keyframes drift-2 {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    transform: translate3d(-70px, -50px, 0) scale(1.12);
+  }
+}
+
+@keyframes drift-3 {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    transform: translate3d(40px, -60px, 0) scale(0.94);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   AppShell responsive helpers.
+   Inline style can't express media queries; this block contains the minimal
+   class-based responsive rules used by Sidebar, TopBar, and MobileOverlay.
+   --------------------------------------------------------------------------- */
+
+.hamburger-button {
+  display: none;
+}
+
+.mobile-overlay {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  body {
+    overflow-x: hidden;
+  }
+
+  .sidebar-shell {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 50;
+    transition: transform 250ms ease-out;
+  }
+
+  .sidebar-mobile-closed {
+    transform: translateX(-100%);
+  }
+
+  .sidebar-mobile-open {
+    transform: translateX(0);
+  }
+
+  .hamburger-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .mobile-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 49;
+  }
+
+  .topbar-email {
+    display: none;
+  }
+
+  .topbar-user-meta {
+    display: none !important;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Dropdown / modal entrance animations.
+   --------------------------------------------------------------------------- */
+
+@keyframes modal-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes modal-card-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Org chart tree connectors (Milestone 2).
+   Pure-CSS nested-list org chart: each <li> draws the elbow connectors to its
+   parent via ::before/::after, and a child <ul> draws the vertical stem up to
+   its parent. Pseudo-elements can't be expressed inline, hence this block.
+   --------------------------------------------------------------------------- */
+
+:root {
+  --org-line: rgba(255, 255, 255, 0.16);
+}
+
+.org-tree {
+  overflow-x: auto;
+  padding: 8px 4px 4px;
+}
+
+.org-tree ul {
+  position: relative;
+  padding: 24px 0 0;
+  margin: 0;
+  list-style: none;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.org-tree li {
+  position: relative;
+  display: inline-block;
+  vertical-align: top;
+  list-style: none;
+  text-align: center;
+  padding: 24px 10px 0;
+  white-space: normal;
+}
+
+/* Elbow connectors from each node up toward its parent. */
+.org-tree li::before,
+.org-tree li::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 50%;
+  width: 50%;
+  height: 24px;
+  border-top: 1px solid var(--org-line);
+}
+
+.org-tree li::after {
+  right: auto;
+  left: 50%;
+  border-left: 1px solid var(--org-line);
+}
+
+/* A single child needs no horizontal bar, just the vertical stem. */
+.org-tree li:only-child::before,
+.org-tree li:only-child::after {
+  display: none;
+}
+
+.org-tree li:only-child {
+  padding-top: 24px;
+}
+
+/* Trim the outer half-bars on the first/last siblings, round the corners. */
+.org-tree li:first-child::before,
+.org-tree li:last-child::after {
+  border: 0 none;
+}
+
+.org-tree li:last-child::before {
+  border-right: 1px solid var(--org-line);
+  border-radius: 0 6px 0 0;
+}
+
+.org-tree li:first-child::after {
+  border-radius: 6px 0 0 0;
+}
+
+/* Vertical stem connecting a child group up to its parent node. */
+.org-tree ul ul::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 0;
+  height: 24px;
+  border-left: 1px solid var(--org-line);
+}
+
+/* Root level has no parent — suppress its connectors and top padding. */
+.org-tree > ul {
+  padding-top: 0;
+}
+
+.org-tree > ul > li {
+  padding-top: 0;
+}
+
+.org-tree > ul > li::before,
+.org-tree > ul > li::after {
+  display: none;
+}
