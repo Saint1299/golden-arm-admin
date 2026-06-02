@@ -155,7 +155,12 @@ export type ApiDocument = {
   id: string;
   scope: DocumentScope;
   guard_id: string | null;
-  client_id: string | null;
+  // Free-text client name for client-scope docs (migration 0008 replaced the
+  // client_id FK). Non-empty when scope=client, null otherwise.
+  client_name_text: string | null;
+  // Free-text issuing body (e.g. SOSIA, NBI). Optional on any scope — lets
+  // admin/HR know where to renew.
+  issuing_agency: string | null;
   doc_type: string;
   doc_number: string | null;
   issue_date: string | null;
@@ -174,7 +179,11 @@ export type ComplianceBoardRow = {
   days_remaining: number | null;
   alert_status: AlertStatus | null;
   guard_name: string | null;
+  // Exposed by the compliance_board view: client_name_text for client scope,
+  // guard's client name for guard scope, NULL for company scope.
   client_name: string | null;
+  // Exposed by the view straight from documents.issuing_agency.
+  issuing_agency: string | null;
   // Not exposed by the compliance_board view (which carries only the
   // computed columns). The page/refetch joins it in from the underlying
   // documents table so the board card can show its file action.
@@ -207,4 +216,20 @@ export const DOC_TYPE_SUGGESTIONS: string[] = [
   "DOLE Permit",
   "BIR Registration",
   "Business Permit",
+];
+
+// Common issuing bodies for PH security-agency compliance docs. Surfaced as a
+// datalist on the document form's Issuing Agency field — suggestions only, the
+// field stays free text.
+export const ISSUING_AGENCY_SUGGESTIONS: string[] = [
+  "SOSIA",
+  "NBI",
+  "PNP",
+  "DOLE",
+  "PADPAO",
+  "BIR",
+  "LTO",
+  "Pag-IBIG",
+  "PhilHealth",
+  "SSS",
 ];

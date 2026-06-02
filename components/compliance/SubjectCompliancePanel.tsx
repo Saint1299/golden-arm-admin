@@ -62,19 +62,29 @@ export function SubjectCompliancePanel({
 
   const loadDocs = useCallback(async (): Promise<ScopedDocument[]> => {
     const supabase = createSupabaseClient();
-    const filterColumn =
-      subjectScope === "guard" ? "guard_id" : "client_id";
-    const { data } = await supabase
+    let query = supabase
       .from("documents")
       .select("*")
-      .eq("scope", subjectScope)
-      .eq(filterColumn, subjectId)
-      .order("expiry_date", { ascending: true, nullsFirst: false });
+      .eq("scope", subjectScope);
+    if (subjectScope === "guard") {
+      query = query.eq("guard_id", subjectId);
+    } else {
+      // Client docs are matched by name now (migration 0008 dropped the
+      // client_id FK in favour of free-text client_name_text). ilike with no
+      // wildcards is a case-insensitive exact match; escape any % or _ in the
+      // client name so they aren't interpreted as LIKE wildcards.
+      const escaped = subjectName.replace(/[\\%_]/g, (m) => `\\${m}`);
+      query = query.ilike("client_name_text", escaped);
+    }
+    const { data } = await query.order("expiry_date", {
+      ascending: true,
+      nullsFirst: false,
+    });
     return ((data ?? []) as ApiDocument[]).map((d) => ({
       ...d,
       computed_alert: computeAlertStatus(d.expiry_date),
     }));
-  }, [subjectScope, subjectId]);
+  }, [subjectScope, subjectId, subjectName]);
 
   useEffect(() => {
     let active = true;
@@ -149,6 +159,21 @@ export function SubjectCompliancePanel({
         </button>
       </div>
 
+      {subjectScope === "client" && !loading && docs.length === 0 ? (
+        <p
+          style={{
+            margin: 0,
+            marginTop: -12,
+            fontSize: 12,
+            color: "rgba(245, 245, 247, 0.4)",
+            lineHeight: 1.5,
+          }}
+        >
+          Docs are matched by client name. If you change a client&rsquo;s name,
+          re-link any docs by editing them.
+        </p>
+      ) : null}
+
       <DocSection
         title="Valid"
         status="ok"
@@ -189,7 +214,6 @@ export function SubjectCompliancePanel({
           initialDoc={null}
           allowedScopes={[subjectScope]}
           presetGuardId={subjectScope === "guard" ? subjectId : undefined}
-          presetClientId={subjectScope === "client" ? subjectId : undefined}
           presetGuardName={subjectScope === "guard" ? subjectName : undefined}
           presetClientName={subjectScope === "client" ? subjectName : undefined}
           onClose={() => setModal(null)}
@@ -406,6 +430,9 @@ function DocMeta({
         Issued {doc.issue_date}
       </span>,
     );
+  }
+  if (doc.issuing_agency) {
+    parts.push(<span key="agency">Issued by {doc.issuing_agency}</span>);
   }
   return (
     <div

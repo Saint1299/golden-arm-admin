@@ -30,6 +30,7 @@ import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import {
   DOCUMENT_SCOPE_LABEL,
   DOC_TYPE_SUGGESTIONS,
+  ISSUING_AGENCY_SUGGESTIONS,
   type ApiDocument,
   type DocumentScope,
 } from "@/types/database";
@@ -41,6 +42,7 @@ const SCOPE_DISPLAY_ORDER: DocumentScope[] = ["company", "client", "guard"];
 
 const DOC_FORM_ID = "document-form";
 const DOC_TYPE_DATALIST_ID = "document-type-suggestions";
+const ISSUING_AGENCY_DATALIST_ID = "document-issuing-agency-suggestions";
 
 type GuardOption = {
   id: string;
@@ -48,16 +50,10 @@ type GuardOption = {
   employee_no: string | null;
 };
 
-type ClientOption = {
-  id: string;
-  name: string;
-};
-
 export function DocumentFormModal({
   initialDoc,
   allowedScopes,
   presetGuardId,
-  presetClientId,
   presetGuardName,
   presetClientName,
   onClose,
@@ -67,12 +63,14 @@ export function DocumentFormModal({
   // Drives the scope control: a dropdown when length > 1, a read-only chip
   // when length === 1. Required + non-empty.
   allowedScopes: DocumentScope[];
-  // Subject locks — independent of scope. When set, the subject picker is
+  // Subject locks — independent of scope. When set, the subject input is
   // replaced by a read-only chip. Edits intentionally don't pass these so
   // the user can re-target the doc within the locked scope.
   presetGuardId?: string;
-  presetClientId?: string;
   presetGuardName?: string;
+  // Client scope is free-text (client_name_text). When presetClientName is
+  // provided (the client detail page locks docs to that client) the name
+  // field is read-only and pre-filled to keep the name-match intact.
   presetClientName?: string;
   onClose: () => void;
   onSaved: () => void;
@@ -100,8 +98,13 @@ export function DocumentFormModal({
   const [guardId, setGuardId] = useState<string | null>(
     initialDoc?.guard_id ?? presetGuardId ?? null,
   );
-  const [clientId, setClientId] = useState<string | null>(
-    initialDoc?.client_id ?? presetClientId ?? null,
+  // Locked to presetClientName when provided (client detail page); otherwise
+  // free text seeded from the existing doc.
+  const [clientNameText, setClientNameText] = useState(
+    initialDoc?.client_name_text ?? presetClientName ?? "",
+  );
+  const [issuingAgency, setIssuingAgency] = useState(
+    initialDoc?.issuing_agency ?? "",
   );
   const [docType, setDocType] = useState(initialDoc?.doc_type ?? "");
   const [docNumber, setDocNumber] = useState(initialDoc?.doc_number ?? "");
@@ -130,44 +133,35 @@ export function DocumentFormModal({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const { showToast } = useToast();
 
-  // Loaded only when at least one picker can actually be shown.
+  // The guard list is loaded only when the guard picker is actually shown.
+  // Client scope is free text now, so it needs no fetch.
   const [guards, setGuards] = useState<GuardOption[] | null>(null);
-  const [clients, setClients] = useState<ClientOption[] | null>(null);
   const [guardSearch, setGuardSearch] = useState("");
 
   const needGuardPicker = displayScopes.includes("guard") && !presetGuardId;
-  const needClientPicker = displayScopes.includes("client") && !presetClientId;
-  const needPickers = needGuardPicker || needClientPicker;
 
   useEffect(() => {
-    if (!needPickers) return;
+    if (!needGuardPicker) return;
     let active = true;
     (async () => {
       const supabase = createSupabaseClient();
-      const [guardsRes, clientsRes] = await Promise.all([
-        supabase
-          .from("guards")
-          .select("id, full_name, employee_no")
-          .eq("status", "active")
-          .order("full_name", { ascending: true }),
-        supabase
-          .from("clients")
-          .select("id, name")
-          .order("name", { ascending: true }),
-      ]);
+      const guardsRes = await supabase
+        .from("guards")
+        .select("id, full_name, employee_no")
+        .eq("status", "active")
+        .order("full_name", { ascending: true });
       if (!active) return;
       setGuards((guardsRes.data ?? []) as GuardOption[]);
-      setClients((clientsRes.data ?? []) as ClientOption[]);
     })();
     return () => {
       active = false;
     };
-  }, [needPickers]);
+  }, [needGuardPicker]);
 
   function handleScopeChange(next: DocumentScope) {
     setScope(next);
     if (next !== "guard") setGuardId(null);
-    if (next !== "client") setClientId(null);
+    if (next !== "client") setClientNameText("");
     setErrorMessage(null);
   }
 
@@ -190,8 +184,8 @@ export function DocumentFormModal({
       setErrorMessage("Pick a guard for guard-scoped documents.");
       return;
     }
-    if (scope === "client" && !clientId) {
-      setErrorMessage("Pick a client for client-scoped documents.");
+    if (scope === "client" && !clientNameText.trim()) {
+      setErrorMessage("Client name is required for client-scoped documents.");
       return;
     }
 
@@ -246,7 +240,8 @@ export function DocumentFormModal({
     const payload = {
       scope,
       guard_id: scope === "guard" ? guardId : null,
-      client_id: scope === "client" ? clientId : null,
+      client_name_text: scope === "client" ? clientNameText.trim() : null,
+      issuing_agency: issuingAgency.trim() ? issuingAgency.trim() : null,
       doc_type: docType.trim(),
       doc_number: docNumber.trim() ? docNumber.trim() : null,
       issue_date: issueDate || null,
@@ -341,18 +336,18 @@ export function DocumentFormModal({
         ) : null}
 
         {scope === "client" ? (
-          presetClientId ? (
-            <Field label="Client">
-              <ReadOnlyValue>{presetClientName ?? "—"}</ReadOnlyValue>
+          presetClientName ? (
+            <Field label="Client name">
+              <ReadOnlyValue>{presetClientName}</ReadOnlyValue>
             </Field>
           ) : (
-            <Field label="Client" htmlFor="doc-client">
-              <ClientPickerSelect
-                id="doc-client"
-                clients={clients ?? []}
-                loading={clients === null}
-                value={clientId ?? ""}
-                onChange={(v) => setClientId(v || null)}
+            <Field label="Client name" htmlFor="doc-client-name">
+              <TextInput
+                id="doc-client-name"
+                value={clientNameText}
+                onChange={setClientNameText}
+                placeholder="e.g. Acme Corporation"
+                required
                 disabled={saving}
               />
             </Field>
@@ -402,6 +397,26 @@ export function DocumentFormModal({
             placeholder="License / certificate / reference no."
             disabled={saving}
           />
+        </Field>
+
+        <Field
+          label="Issuing agency"
+          htmlFor="doc-issuing-agency"
+          helper="Where this document is renewed (optional)."
+        >
+          <TextInput
+            id="doc-issuing-agency"
+            value={issuingAgency}
+            onChange={setIssuingAgency}
+            placeholder="e.g. SOSIA"
+            disabled={saving}
+            list={ISSUING_AGENCY_DATALIST_ID}
+          />
+          <datalist id={ISSUING_AGENCY_DATALIST_ID}>
+            {ISSUING_AGENCY_SUGGESTIONS.map((s) => (
+              <option key={s} value={s} />
+            ))}
+          </datalist>
         </Field>
 
         <div style={{ display: "flex", gap: 12 }}>
@@ -864,83 +879,6 @@ function GuardOptionRow({
       >
         {guard.employee_no ?? ""}
       </span>
-    </div>
-  );
-}
-
-function ClientPickerSelect({
-  id,
-  clients,
-  loading,
-  value,
-  onChange,
-  disabled,
-}: {
-  id: string;
-  clients: ClientOption[];
-  loading: boolean;
-  value: string;
-  onChange: (v: string) => void;
-  disabled: boolean;
-}) {
-  const [focused, setFocused] = useState(false);
-  if (loading) {
-    return <ReadOnlyValue>Loading clients…</ReadOnlyValue>;
-  }
-  return (
-    <div style={{ position: "relative" }}>
-      <select
-        id={id}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
-        disabled={disabled}
-        style={{
-          width: "100%",
-          appearance: "none",
-          WebkitAppearance: "none",
-          MozAppearance: "none",
-          backgroundColor: "rgba(255, 255, 255, 0.04)",
-          border: `1px solid ${focused ? "rgba(201, 169, 97, 0.5)" : "rgba(255, 255, 255, 0.08)"}`,
-          borderRadius: 8,
-          padding: "10px 40px 10px 14px",
-          color: "#f5f5f7",
-          fontSize: 14,
-          fontFamily: "inherit",
-          outline: "none",
-          cursor: disabled ? "not-allowed" : "pointer",
-        }}
-      >
-        <option value="" style={{ background: "#080b12" }}>
-          — Pick a client —
-        </option>
-        {clients.map((c) => (
-          <option key={c.id} value={c.id} style={{ background: "#080b12" }}>
-            {c.name}
-          </option>
-        ))}
-      </select>
-      <svg
-        width="12"
-        height="12"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="rgba(245, 245, 247, 0.6)"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden
-        style={{
-          position: "absolute",
-          right: 14,
-          top: "50%",
-          transform: "translateY(-50%)",
-          pointerEvents: "none",
-        }}
-      >
-        <polyline points="6 9 12 15 18 9" />
-      </svg>
     </div>
   );
 }

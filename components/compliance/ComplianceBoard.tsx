@@ -518,18 +518,19 @@ function DocCard({
 }) {
   const [hover, setHover] = useState(false);
   const { showToast } = useToast();
+  // Company scope carries no subject — the scope badge already says "Company",
+  // so a redundant label is dropped. Client/guard show their name.
   const subject =
     row.scope === "guard"
       ? row.guard_name ?? "Unknown guard"
       : row.scope === "client"
         ? row.client_name ?? "Unknown client"
-        : "Company";
+        : null;
 
   // Single meta line: subject + doc number, omitting empties.
-  const metaParts = [
-    subject,
-    row.doc_number ?? null,
-  ].filter((v): v is string => Boolean(v));
+  const metaParts = [subject, row.doc_number ?? null].filter(
+    (v): v is string => Boolean(v),
+  );
 
   async function handleViewFile() {
     if (!row.file_url) return;
@@ -596,6 +597,27 @@ function DocCard({
         </div>
       ) : null}
 
+      {row.issuing_agency ? (
+        <div style={{ marginTop: 6 }}>
+          <span
+            style={{
+              display: "inline-block",
+              fontSize: 10.5,
+              fontWeight: 500,
+              letterSpacing: "0.01em",
+              color: "rgba(245, 245, 247, 0.65)",
+              backgroundColor: "rgba(255, 255, 255, 0.05)",
+              border: "1px solid rgba(255, 255, 255, 0.08)",
+              borderRadius: 999,
+              padding: "2px 8px",
+            }}
+            title={`Issued by ${row.issuing_agency}`}
+          >
+            Issued by {row.issuing_agency}
+          </span>
+        </div>
+      ) : null}
+
       <div
         style={{
           marginTop: 10,
@@ -639,6 +661,12 @@ function DocCard({
         {row.alert_status ? <AlertStatusBadge status={row.alert_status} /> : null}
       </div>
 
+      {row.file_url ? (
+        <div style={{ marginTop: 10 }}>
+          <DownloadFileButton onClick={handleViewFile} />
+        </div>
+      ) : null}
+
       <div
         style={{
           marginTop: 9,
@@ -649,9 +677,6 @@ function DocCard({
           justifyContent: "flex-end",
         }}
       >
-        {row.file_url ? (
-          <FileAction onClick={handleViewFile} />
-        ) : null}
         <CardAction label="Edit" onClick={onEdit} />
         <CardAction label="Delete" onClick={onDelete} danger />
       </div>
@@ -659,7 +684,10 @@ function DocCard({
   );
 }
 
-function FileAction({ onClick }: { onClick: () => void }) {
+// Prominent, clearly-labelled download action. Mints a short-lived signed URL
+// and opens the file (see lib/compliance-storage openComplianceFile) — same
+// flow as before, just surfaced as an obvious button rather than an icon chip.
+function DownloadFileButton({ onClick }: { onClick: () => void }) {
   const [hover, setHover] = useState(false);
   return (
     <button
@@ -667,37 +695,41 @@ function FileAction({ onClick }: { onClick: () => void }) {
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      aria-label="View file"
-      title="View file"
       style={{
-        background: "transparent",
-        border: "none",
-        padding: 0,
+        width: "100%",
         display: "inline-flex",
         alignItems: "center",
-        gap: 4,
-        fontSize: 11.5,
-        fontWeight: 500,
+        justifyContent: "center",
+        gap: 7,
+        padding: "7px 12px",
+        fontSize: 12,
+        fontWeight: 600,
         fontFamily: "inherit",
+        letterSpacing: "-0.01em",
         cursor: "pointer",
-        color: hover ? "#d4b670" : "rgba(245, 245, 247, 0.55)",
-        transition: "color 150ms ease-out",
+        color: hover ? "#080b12" : "#d4b670",
+        backgroundColor: hover ? "#d4b670" : "rgba(201, 169, 97, 0.12)",
+        border: "1px solid rgba(201, 169, 97, 0.4)",
+        borderRadius: 8,
+        transition: "background-color 150ms ease-out, color 150ms ease-out",
       }}
     >
       <svg
-        width="12"
-        height="12"
+        width="13"
+        height="13"
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"
-        strokeWidth="1.6"
+        strokeWidth="2"
         strokeLinecap="round"
         strokeLinejoin="round"
         aria-hidden
       >
-        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+        <polyline points="7 10 12 15 17 10" />
+        <line x1="12" y1="15" x2="12" y2="3" />
       </svg>
-      File
+      Download file
     </button>
   );
 }
