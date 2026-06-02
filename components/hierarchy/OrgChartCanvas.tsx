@@ -1,13 +1,6 @@
 "use client";
 
-import Link from "next/link";
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-} from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   DndContext,
   PointerSensor,
@@ -77,22 +70,6 @@ type Modal =
   | { mode: "add-child"; parent: OrgNode }
   | { mode: "rename"; node: OrgNode }
   | null;
-
-const goldButtonStyle: CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 8,
-  background: "rgba(255, 255, 255, 0.04)",
-  border: "1px solid rgba(255, 255, 255, 0.12)",
-  color: "rgba(245, 245, 247, 0.8)",
-  borderRadius: 8,
-  padding: "9px 14px",
-  fontWeight: 500,
-  fontSize: 13,
-  fontFamily: "inherit",
-  cursor: "pointer",
-  textDecoration: "none",
-};
 
 export function OrgChartCanvas({
   client,
@@ -410,54 +387,22 @@ export function OrgChartCanvas({
 
   // ---- Render --------------------------------------------------------------
 
+  // The chart is now embedded directly in the client detail page (no
+  // breadcrumb, no h1, no back link) — those live in the parent. We render
+  // a small inline hint + the DnD canvas.
   return (
-    <div style={{ maxWidth: 1280 }}>
-      <Breadcrumb client={client} />
-
-      <div
+    <div>
+      <p
         style={{
-          marginTop: 8,
-          display: "flex",
-          alignItems: "flex-start",
-          justifyContent: "space-between",
-          gap: 16,
-          flexWrap: "wrap",
+          marginTop: 0,
+          marginBottom: 16,
+          fontSize: 13,
+          color: "rgba(245, 245, 247, 0.55)",
         }}
       >
-        <div>
-          <h1
-            style={{
-              fontSize: 28,
-              fontWeight: 600,
-              letterSpacing: "-0.02em",
-              color: "#f5f5f7",
-              margin: 0,
-            }}
-          >
-            Org chart — {client.name}
-          </h1>
-          <p
-            style={{
-              marginTop: 8,
-              marginBottom: 0,
-              fontSize: 13,
-              color: "rgba(245, 245, 247, 0.55)",
-            }}
-          >
-            Drag a node onto another to re-parent. Drag a guard chip onto a
-            node to assign, or onto the Unassigned strip to unassign.
-          </p>
-        </div>
-        <Link
-          href={`/hierarchy/clients/${client.id}`}
-          style={goldButtonStyle}
-        >
-          ← Back to client
-        </Link>
-      </div>
-
-      <div style={{ height: 20 }} />
-
+        Drag a node onto another to re-parent. Drag a guard chip onto a node
+        to assign, or onto the Unassigned strip to unassign.
+      </p>
       <DndContext
         sensors={sensors}
         collisionDetection={pointerWithin}
@@ -532,43 +477,6 @@ export function OrgChartCanvas({
           onClose={() => setModal(null)}
         />
       ) : null}
-    </div>
-  );
-}
-
-function Breadcrumb({ client }: { client: Client }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        fontSize: 13,
-        color: "rgba(245, 245, 247, 0.45)",
-      }}
-    >
-      <Link
-        href="/hierarchy"
-        style={{ color: "rgba(245, 245, 247, 0.6)", textDecoration: "none" }}
-      >
-        Guard Deployment
-      </Link>
-      <span aria-hidden>/</span>
-      <Link
-        href="/hierarchy/clients"
-        style={{ color: "rgba(245, 245, 247, 0.6)", textDecoration: "none" }}
-      >
-        Clients
-      </Link>
-      <span aria-hidden>/</span>
-      <Link
-        href={`/hierarchy/clients/${client.id}`}
-        style={{ color: "rgba(245, 245, 247, 0.6)", textDecoration: "none" }}
-      >
-        {client.name}
-      </Link>
-      <span aria-hidden>/</span>
-      <span style={{ color: "rgba(245, 245, 247, 0.7)" }}>Org chart</span>
     </div>
   );
 }

@@ -12,17 +12,12 @@ import {
 import { ClientTypeBadge, GuardStatusBadge } from "./badges";
 import { ClientFormModal } from "./ClientFormModal";
 import { GuardFormModal } from "./GuardFormModal";
+import { OrgChartCanvas } from "./OrgChartCanvas";
 import { SubjectCompliancePanel } from "@/components/compliance/SubjectCompliancePanel";
 import { GlassCard } from "@/components/ui/GlassCard";
-import { SelectInput, TextInput } from "@/components/ui/form";
 import { useToast } from "@/components/ui/Toast";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
-import {
-  GUARD_STATUS_LABEL,
-  type Client,
-  type Guard,
-  type GuardStatus,
-} from "@/types/database";
+import type { Client, Guard, OrgNode } from "@/types/database";
 
 const goldButtonStyle: CSSProperties = {
   display: "inline-flex",
@@ -72,38 +67,33 @@ const bodyCellStyle: CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-const STATUS_OPTIONS = [
-  { value: "all", label: "All statuses" },
-  ...(["active", "reliever", "on_leave", "inactive"] as GuardStatus[]).map(
-    (s) => ({ value: s, label: GUARD_STATUS_LABEL[s] }),
-  ),
-];
-
 export function ClientDetailView({
   client: initialClient,
   clients,
   initialGuards,
+  initialNodes,
 }: {
   client: Client;
   clients: Client[];
   initialGuards: Guard[];
+  // Pre-fetched only for pooled clients. For single_post we pass an empty
+  // array; the chart isn't rendered, so the data is never used.
+  initialNodes: OrgNode[];
 }) {
   const router = useRouter();
   const { showToast } = useToast();
 
   // The client itself can be edited — keep it in state so post-edit refetch
-  // reflects in the header / info card without a full page reload.
+  // reflects in the header / info chips without a full page reload.
   const [client, setClient] = useState<Client>(initialClient);
-
   const [guards, setGuards] = useState<Guard[]>(initialGuards);
-  const [guardModalOpen, setGuardModalOpen] = useState(false);
   const [clientEditOpen, setClientEditOpen] = useState(false);
+  const [guardModal, setGuardModal] = useState<{
+    open: boolean;
+    editing: Guard | null;
+  }>({ open: false, editing: null });
 
-  // Guards section filters.
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
-
-  const refetch = useCallback(async () => {
+  const refetchGuards = useCallback(async () => {
     const supabase = createSupabaseClient();
     const [clientRes, guardsRes] = await Promise.all([
       supabase
@@ -117,25 +107,9 @@ export function ClientDetailView({
         .eq("client_id", client.id)
         .order("full_name", { ascending: true }),
     ]);
-    if (clientRes.data) {
-      setClient(clientRes.data as Client);
-    }
+    if (clientRes.data) setClient(clientRes.data as Client);
     setGuards((guardsRes.data ?? []) as Guard[]);
   }, [client.id]);
-
-  const filteredGuards = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return guards
-      .filter((g) => {
-        if (statusFilter !== "all" && g.status !== statusFilter) return false;
-        if (q) {
-          const hay = `${g.full_name} ${g.employee_no ?? ""} ${g.sosia_license ?? ""}`.toLowerCase();
-          if (!hay.includes(q)) return false;
-        }
-        return true;
-      })
-      .sort((a, b) => a.full_name.localeCompare(b.full_name));
-  }, [guards, search, statusFilter]);
 
   async function handleDeleteClient() {
     const ok = window.confirm(
@@ -155,7 +129,7 @@ export function ClientDetailView({
       return;
     }
     showToast("Client deleted", "success");
-    router.push("/hierarchy/clients");
+    router.push("/hierarchy");
   }
 
   async function handleDeleteGuard(guard: Guard) {
@@ -173,14 +147,14 @@ export function ClientDetailView({
       return;
     }
     showToast("Guard deleted", "success");
-    refetch();
+    refetchGuards();
   }
 
-  const [editingGuard, setEditingGuard] = useState<Guard | null>(null);
+  const isPooled = client.type === "pooled";
 
   return (
     <div style={{ maxWidth: 1280 }}>
-      <Breadcrumb client={client} />
+      <Breadcrumb clientName={client.name} />
 
       {/* Header */}
       <div
@@ -193,26 +167,32 @@ export function ClientDetailView({
           flexWrap: "wrap",
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            flexWrap: "wrap",
-          }}
-        >
-          <h1
+        <div style={{ minWidth: 0 }}>
+          <div
             style={{
-              fontSize: 28,
-              fontWeight: 600,
-              letterSpacing: "-0.02em",
-              color: "#f5f5f7",
-              margin: 0,
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              flexWrap: "wrap",
             }}
           >
-            {client.name}
-          </h1>
-          <ClientTypeBadge type={client.type} />
+            <h1
+              style={{
+                fontSize: 28,
+                fontWeight: 600,
+                letterSpacing: "-0.02em",
+                color: "#f5f5f7",
+                margin: 0,
+              }}
+            >
+              {client.name}
+            </h1>
+            <ClientTypeBadge type={client.type} />
+          </div>
+          <InfoChips
+            client={client}
+            guardCount={guards.length}
+          />
         </div>
         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
           <button
@@ -236,32 +216,175 @@ export function ClientDetailView({
         </div>
       </div>
 
-      {/* Info card */}
-      <div style={{ height: 16 }} />
-      <GlassCard>
+      <div style={{ height: 24 }} />
+
+      {/* Body — chart for pooled, flat guards list for single_post */}
+      {isPooled ? (
+        <OrgChartCanvas
+          client={client}
+          initialNodes={initialNodes}
+          initialGuards={initialGuards}
+        />
+      ) : (
+        <SinglePostBody
+          guards={guards}
+          onAddGuard={() =>
+            setGuardModal({ open: true, editing: null })
+          }
+          onEditGuard={(g) =>
+            setGuardModal({ open: true, editing: g })
+          }
+          onDeleteGuard={handleDeleteGuard}
+        />
+      )}
+
+      {/* Compliance documents — same SubjectCompliancePanel used elsewhere.
+          No outer collapsible wrapper: the panel renders its own Valid /
+          Due Soon / Expired grouping internally, so wrapping it again would
+          mean two layers of collapse. */}
+      <div style={{ height: 32 }} />
+      <h2
+        style={{
+          fontSize: 16,
+          fontWeight: 600,
+          color: "#f5f5f7",
+          letterSpacing: "-0.01em",
+          margin: 0,
+          marginBottom: 12,
+        }}
+      >
+        Compliance documents
+      </h2>
+      <SubjectCompliancePanel
+        subjectScope="client"
+        subjectId={client.id}
+        subjectName={client.name}
+        addButtonLabel="Add document for this client"
+      />
+
+      {clientEditOpen ? (
+        <ClientFormModal
+          initialClient={client}
+          onClose={() => setClientEditOpen(false)}
+          onSaved={() => {
+            setClientEditOpen(false);
+            refetchGuards();
+          }}
+        />
+      ) : null}
+
+      {guardModal.open ? (
+        <GuardFormModal
+          clientId={client.id}
+          initialGuard={guardModal.editing}
+          clients={clients}
+          onClose={() => setGuardModal({ open: false, editing: null })}
+          onSaved={() => {
+            setGuardModal({ open: false, editing: null });
+            refetchGuards();
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function Breadcrumb({ clientName }: { clientName: string }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        fontSize: 13,
+        color: "rgba(245, 245, 247, 0.45)",
+        flexWrap: "wrap",
+      }}
+    >
+      <Link
+        href="/hierarchy"
+        style={{ color: "rgba(245, 245, 247, 0.6)", textDecoration: "none" }}
+      >
+        Guard Deployment
+      </Link>
+      <span aria-hidden>/</span>
+      <span style={{ color: "rgba(245, 245, 247, 0.7)" }}>{clientName}</span>
+    </div>
+  );
+}
+
+function InfoChips({
+  client,
+  guardCount,
+}: {
+  client: Client;
+  guardCount: number;
+}) {
+  const chips: Array<{ label: string; value: string }> = [];
+  chips.push({
+    label: "Guards",
+    value: String(guardCount),
+  });
+  if (client.industry) chips.push({ label: "Industry", value: client.industry });
+  if (client.conglomerate)
+    chips.push({ label: "Conglomerate", value: client.conglomerate });
+  if (chips.length === 0) return null;
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 14,
+        flexWrap: "wrap",
+        marginTop: 10,
+        fontSize: 12,
+      }}
+    >
+      {chips.map((c, i) => (
         <div
+          key={i}
           style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-            gap: "16px 28px",
+            display: "inline-flex",
+            alignItems: "baseline",
+            gap: 6,
           }}
         >
-          <InfoItem
-            label="Type"
-            value={<ClientTypeBadge type={client.type} />}
-          />
-          <InfoItem label="Industry" value={client.industry} />
-          <InfoItem label="Conglomerate" value={client.conglomerate} />
-          <InfoItem
-            label="Guards"
-            value={String(guards.length)}
-            tabular
-          />
+          <span
+            style={{
+              color: "rgba(245, 245, 247, 0.4)",
+              fontSize: 10.5,
+              fontWeight: 500,
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+            }}
+          >
+            {c.label}
+          </span>
+          <span style={{ color: "rgba(245, 245, 247, 0.85)", fontWeight: 500 }}>
+            {c.value}
+          </span>
         </div>
-      </GlassCard>
+      ))}
+    </div>
+  );
+}
 
-      {/* Guards section */}
-      <div style={{ height: 28 }} />
+function SinglePostBody({
+  guards,
+  onAddGuard,
+  onEditGuard,
+  onDeleteGuard,
+}: {
+  guards: Guard[];
+  onAddGuard: () => void;
+  onEditGuard: (g: Guard) => void;
+  onDeleteGuard: (g: Guard) => void;
+}) {
+  const sorted = useMemo(
+    () => [...guards].sort((a, b) => a.full_name.localeCompare(b.full_name)),
+    [guards],
+  );
+  return (
+    <div>
       <div
         style={{
           display: "flex",
@@ -271,25 +394,30 @@ export function ClientDetailView({
           flexWrap: "wrap",
         }}
       >
-        <h2
-          style={{
-            fontSize: 16,
-            fontWeight: 600,
-            color: "#f5f5f7",
-            letterSpacing: "-0.01em",
-            margin: 0,
-          }}
-        >
-          Guards
-        </h2>
-        <button
-          type="button"
-          style={goldButtonStyle}
-          onClick={() => {
-            setEditingGuard(null);
-            setGuardModalOpen(true);
-          }}
-        >
+        <div>
+          <h2
+            style={{
+              fontSize: 16,
+              fontWeight: 600,
+              color: "#f5f5f7",
+              letterSpacing: "-0.01em",
+              margin: 0,
+            }}
+          >
+            Guards
+          </h2>
+          <p
+            style={{
+              marginTop: 6,
+              marginBottom: 0,
+              fontSize: 12,
+              color: "rgba(245, 245, 247, 0.5)",
+            }}
+          >
+            Single-post clients don&rsquo;t have an org chart.
+          </p>
+        </div>
+        <button type="button" style={goldButtonStyle} onClick={onAddGuard}>
           <svg
             width="14"
             height="14"
@@ -309,36 +437,8 @@ export function ClientDetailView({
 
       <div style={{ height: 12 }} />
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "minmax(220px, 1fr) minmax(180px, 220px)",
-          gap: 12,
-          marginBottom: 14,
-        }}
-      >
-        <div>
-          <FilterLabel htmlFor="gd-search">Search</FilterLabel>
-          <TextInput
-            id="gd-search"
-            value={search}
-            onChange={setSearch}
-            placeholder="Name, employee no., SOSIA…"
-          />
-        </div>
-        <div>
-          <FilterLabel htmlFor="gd-status">Status</FilterLabel>
-          <SelectInput
-            id="gd-status"
-            value={statusFilter}
-            onChange={setStatusFilter}
-            options={STATUS_OPTIONS}
-          />
-        </div>
-      </div>
-
       <GlassCard style={{ padding: 0, overflow: "hidden" }}>
-        {guards.length === 0 ? (
+        {sorted.length === 0 ? (
           <div
             style={{
               padding: "40px 24px",
@@ -348,17 +448,6 @@ export function ClientDetailView({
             }}
           >
             No guards deployed to this client yet.
-          </div>
-        ) : filteredGuards.length === 0 ? (
-          <div
-            style={{
-              padding: "40px 24px",
-              textAlign: "center",
-              color: "rgba(245, 245, 247, 0.6)",
-              fontSize: 13,
-            }}
-          >
-            No guards match the current filters.
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
@@ -381,16 +470,13 @@ export function ClientDetailView({
                 </tr>
               </thead>
               <tbody>
-                {filteredGuards.map((g, idx) => (
+                {sorted.map((g, idx) => (
                   <GuardRow
                     key={g.id}
                     guard={g}
                     striped={idx % 2 === 1}
-                    onEdit={() => {
-                      setEditingGuard(g);
-                      setGuardModalOpen(true);
-                    }}
-                    onDelete={() => handleDeleteGuard(g)}
+                    onEdit={() => onEditGuard(g)}
+                    onDelete={() => onDeleteGuard(g)}
                   />
                 ))}
               </tbody>
@@ -398,206 +484,7 @@ export function ClientDetailView({
           </div>
         )}
       </GlassCard>
-
-      {/* Org chart — pooled only. Lives on its own DnD sub-page now. */}
-      {client.type === "pooled" ? (
-        <>
-          <div style={{ height: 28 }} />
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-              justifyContent: "space-between",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span
-                aria-hidden
-                style={{
-                  display: "inline-block",
-                  width: 10,
-                  height: 10,
-                  borderRadius: "50%",
-                  backgroundColor: "#c9a961",
-                }}
-              />
-              <h2
-                style={{
-                  fontSize: 16,
-                  fontWeight: 600,
-                  color: "#f5f5f7",
-                  letterSpacing: "-0.01em",
-                  margin: 0,
-                }}
-              >
-                Org chart
-              </h2>
-            </div>
-            <Link
-              href={`/hierarchy/clients/${client.id}/org-chart`}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 8,
-                background: "rgba(255, 255, 255, 0.04)",
-                border: "1px solid rgba(255, 255, 255, 0.12)",
-                color: "rgba(245, 245, 247, 0.85)",
-                borderRadius: 8,
-                padding: "9px 14px",
-                fontWeight: 500,
-                fontSize: 13,
-                fontFamily: "inherit",
-                textDecoration: "none",
-              }}
-            >
-              View org chart →
-            </Link>
-          </div>
-        </>
-      ) : null}
-
-      {/* Compliance section */}
-      <div style={{ height: 28 }} />
-      <h2
-        style={{
-          fontSize: 16,
-          fontWeight: 600,
-          color: "#f5f5f7",
-          letterSpacing: "-0.01em",
-          marginBottom: 12,
-        }}
-      >
-        Compliance
-      </h2>
-      <SubjectCompliancePanel
-        subjectScope="client"
-        subjectId={client.id}
-        subjectName={client.name}
-        addButtonLabel="Add document for this client"
-      />
-
-      {guardModalOpen ? (
-        <GuardFormModal
-          clientId={client.id}
-          initialGuard={editingGuard}
-          clients={clients}
-          onClose={() => {
-            setGuardModalOpen(false);
-            setEditingGuard(null);
-          }}
-          onSaved={() => {
-            setGuardModalOpen(false);
-            setEditingGuard(null);
-            refetch();
-          }}
-        />
-      ) : null}
-
-      {clientEditOpen ? (
-        <ClientFormModal
-          initialClient={client}
-          onClose={() => setClientEditOpen(false)}
-          onSaved={() => {
-            setClientEditOpen(false);
-            refetch();
-          }}
-        />
-      ) : null}
     </div>
-  );
-}
-
-function Breadcrumb({ client }: { client: Client }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        fontSize: 13,
-        color: "rgba(245, 245, 247, 0.45)",
-        flexWrap: "wrap",
-      }}
-    >
-      <Link
-        href="/hierarchy"
-        style={{ color: "rgba(245, 245, 247, 0.6)", textDecoration: "none" }}
-      >
-        Guard Deployment
-      </Link>
-      <span aria-hidden>/</span>
-      <Link
-        href="/hierarchy/clients"
-        style={{ color: "rgba(245, 245, 247, 0.6)", textDecoration: "none" }}
-      >
-        Clients
-      </Link>
-      <span aria-hidden>/</span>
-      <span style={{ color: "rgba(245, 245, 247, 0.7)" }}>{client.name}</span>
-    </div>
-  );
-}
-
-function InfoItem({
-  label,
-  value,
-  tabular,
-}: {
-  label: string;
-  value: ReactNode;
-  tabular?: boolean;
-}) {
-  const isEmpty = value === null || value === undefined || value === "";
-  return (
-    <div>
-      <div
-        style={{
-          fontSize: 11,
-          fontWeight: 500,
-          letterSpacing: "0.06em",
-          textTransform: "uppercase",
-          color: "rgba(245, 245, 247, 0.4)",
-          marginBottom: 6,
-        }}
-      >
-        {label}
-      </div>
-      <div
-        className={tabular ? "tabular" : undefined}
-        style={{
-          fontSize: 14,
-          color: isEmpty ? "rgba(245, 245, 247, 0.35)" : "#f5f5f7",
-        }}
-      >
-        {isEmpty ? "—" : value}
-      </div>
-    </div>
-  );
-}
-
-function FilterLabel({
-  children,
-  htmlFor,
-}: {
-  children: ReactNode;
-  htmlFor: string;
-}) {
-  return (
-    <label
-      htmlFor={htmlFor}
-      style={{
-        display: "block",
-        color: "rgba(245, 245, 247, 0.6)",
-        fontSize: 12,
-        fontWeight: 500,
-        letterSpacing: "0.02em",
-        textTransform: "uppercase",
-        marginBottom: 6,
-      }}
-    >
-      {children}
-    </label>
   );
 }
 
@@ -665,7 +552,7 @@ function RowAction({
   label: string;
   onClick: () => void;
   danger?: boolean;
-}) {
+}): ReactNode {
   const [hover, setHover] = useState(false);
   const color = danger
     ? hover

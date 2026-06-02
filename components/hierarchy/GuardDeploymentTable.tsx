@@ -11,6 +11,7 @@ import {
 } from "react";
 import { GuardStatusBadge } from "./badges";
 import { BulkImportModal } from "./BulkImportModal";
+import { ClientFormModal } from "./ClientFormModal";
 import { GuardFormModal } from "./GuardFormModal";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { MultiSelectDropdown } from "@/components/ui/MultiSelectDropdown";
@@ -103,31 +104,52 @@ const STATUS_OPTIONS = (
 
 export function GuardDeploymentTable({
   initialRows,
-  clients,
+  clients: initialClients,
 }: {
   initialRows: GuardDeploymentRow[];
   clients: Client[];
 }) {
   const [rows, setRows] = useState<GuardDeploymentRow[]>(initialRows);
+  // clients is mutable state — adding/editing/deleting a client from this
+  // page needs to flow back into the dropdown filter + the modal pickers
+  // without a full page reload.
+  const [clients, setClients] = useState<Client[]>(initialClients);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<Set<string>>(new Set());
   const [clientFilter, setClientFilter] = useState<Set<string>>(new Set());
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [modal, setModal] = useState<
+  const [guardModal, setGuardModal] = useState<
     | { mode: "add" }
     | { mode: "edit"; guard: Guard }
     | null
   >(null);
-  const [bulkOpen, setBulkOpen] = useState(false);
+  const [clientModal, setClientModal] = useState<{
+    open: boolean;
+    editing: Client | null;
+  }>({ open: false, editing: null });
+  const [bulkMode, setBulkMode] = useState<"clients" | "guards" | null>(null);
   const { showToast } = useToast();
+
+  // Fast lookup of client by id for the section-header edit handler.
+  const clientById = useMemo(() => {
+    const m = new Map<string, Client>();
+    for (const c of clients) m.set(c.id, c);
+    return m;
+  }, [clients]);
 
   const refetch = useCallback(async () => {
     const supabase = createSupabaseClient();
-    const { data } = await supabase
-      .from("guards")
-      .select("*, client:clients(id, name, type)")
-      .order("full_name", { ascending: true });
-    const next: GuardDeploymentRow[] = ((data ?? []) as RawGuardRow[]).map(
+    const [guardsRes, clientsRes] = await Promise.all([
+      supabase
+        .from("guards")
+        .select("*, client:clients(id, name, type)")
+        .order("full_name", { ascending: true }),
+      supabase.from("clients").select("*").order("name", { ascending: true }),
+    ]);
+    setClients((clientsRes.data ?? []) as Client[]);
+    const next: GuardDeploymentRow[] = (
+      (guardsRes.data ?? []) as RawGuardRow[]
+    ).map(
       (g) => ({
         id: g.id,
         client_id: g.client_id,
@@ -211,6 +233,35 @@ export function GuardDeploymentTable({
     refetch();
   }
 
+  function handleEditClient(clientId: string) {
+    const c = clientById.get(clientId);
+    if (!c) return;
+    setClientModal({ open: true, editing: c });
+  }
+
+  async function handleDeleteClient(clientId: string) {
+    const c = clientById.get(clientId);
+    if (!c) return;
+    const ok = window.confirm(
+      `Delete "${c.name}"? Clients with guards can't be deleted until their guards are removed.`,
+    );
+    if (!ok) return;
+    const supabase = createSupabaseClient();
+    const { error } = await supabase
+      .from("clients")
+      .delete()
+      .eq("id", clientId);
+    if (error) {
+      const msg = /foreign key|violates/i.test(error.message)
+        ? "Client has guards and can't be deleted. Reassign or remove them first."
+        : error.message;
+      showToast(msg, "error");
+      return;
+    }
+    showToast("Client deleted", "success");
+    refetch();
+  }
+
   const clientOptions = useMemo(
     () => clients.map((c) => ({ value: c.id, label: c.name })),
     [clients],
@@ -252,30 +303,25 @@ export function GuardDeploymentTable({
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <Link href="/hierarchy/clients" style={secondaryButtonStyle}>
-            Manage clients
-          </Link>
+          {/* Client actions are always enabled — they don't depend on
+              existing data and they're the unblocker for the guard
+              actions, which we visibly disable when there are zero
+              clients (see comment below the client buttons). */}
           <button
             type="button"
             style={secondaryButtonStyle}
-            onClick={() => setBulkOpen(true)}
-            disabled={clients.length === 0}
-            title={
-              clients.length === 0
-                ? "Add a client first"
-                : "Import guards from a CSV"
-            }
+            onClick={() => setBulkMode("clients")}
+            title="Import clients from a CSV"
           >
-            Bulk import
+            Bulk import clients
           </button>
           <button
             type="button"
             style={addButtonStyle}
-            onClick={() => setModal({ mode: "add" })}
-            disabled={clients.length === 0}
-            title={
-              clients.length === 0 ? "Add a client first" : "Add a new guard"
+            onClick={() =>
+              setClientModal({ open: true, editing: null })
             }
+            title="Add a new client"
           >
             <svg
               width="14"
@@ -290,8 +336,77 @@ export function GuardDeploymentTable({
               <line x1="12" y1="5" x2="12" y2="19" />
               <line x1="5" y1="12" x2="19" y2="12" />
             </svg>
-            Add guard
+            Add client
           </button>
+          {/* Guard actions need at least one client (the guard CSV
+              resolves by client_name, and a single Add Guard requires a
+              client_id FK). When there are no clients we leave the
+              buttons rendered so the title-tooltip still surfaces on
+              hover — but we drop the disabled attribute and visibly grey
+              them out, since native `disabled` suppresses pointer events
+              (and the tooltip) on most browsers. onClick is a no-op when
+              gated, so there's no functional click. */}
+          {(() => {
+            const guardActionsGated = clients.length === 0;
+            return (
+              <>
+                <button
+                  type="button"
+                  style={{
+                    ...secondaryButtonStyle,
+                    opacity: guardActionsGated ? 0.45 : 1,
+                    cursor: guardActionsGated ? "not-allowed" : "pointer",
+                  }}
+                  aria-disabled={guardActionsGated}
+                  onClick={
+                    guardActionsGated ? undefined : () => setBulkMode("guards")
+                  }
+                  title={
+                    guardActionsGated
+                      ? "Add a client first — guards need a client to be assigned to."
+                      : "Import guards from a CSV"
+                  }
+                >
+                  Bulk import guards
+                </button>
+                <button
+                  type="button"
+                  style={{
+                    ...addButtonStyle,
+                    opacity: guardActionsGated ? 0.45 : 1,
+                    cursor: guardActionsGated ? "not-allowed" : "pointer",
+                    filter: guardActionsGated ? "saturate(0.55)" : "none",
+                  }}
+                  aria-disabled={guardActionsGated}
+                  onClick={
+                    guardActionsGated
+                      ? undefined
+                      : () => setGuardModal({ mode: "add" })
+                  }
+                  title={
+                    guardActionsGated
+                      ? "Add a client first — guards need a client to be assigned to."
+                      : "Add a new guard"
+                  }
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="#080b12"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    aria-hidden
+                  >
+                    <line x1="12" y1="5" x2="12" y2="19" />
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                  Add guard
+                </button>
+              </>
+            );
+          })()}
         </div>
       </div>
 
@@ -338,7 +453,13 @@ export function GuardDeploymentTable({
 
       <GlassCard style={{ padding: 0, overflow: "hidden" }}>
         {rows.length === 0 ? (
-          <Empty />
+          <Empty
+            hasClients={clients.length > 0}
+            onAddClient={() =>
+              setClientModal({ open: true, editing: null })
+            }
+            onBulkImportClients={() => setBulkMode("clients")}
+          />
         ) : sections.length === 0 ? (
           <FilteredEmpty />
         ) : (
@@ -372,6 +493,8 @@ export function GuardDeploymentTable({
                       count={section.guards.length}
                       collapsed={isCollapsed}
                       onToggle={() => toggleCollapsed(section.id)}
+                      onEditClient={() => handleEditClient(section.id)}
+                      onDeleteClient={() => handleDeleteClient(section.id)}
                     >
                       {!isCollapsed
                         ? section.guards.map((g, idx) => (
@@ -380,7 +503,7 @@ export function GuardDeploymentTable({
                               guard={g}
                               striped={idx % 2 === 1}
                               onEdit={() =>
-                                setModal({
+                                setGuardModal({
                                   mode: "edit",
                                   guard: rowToGuard(g),
                                 })
@@ -398,38 +521,49 @@ export function GuardDeploymentTable({
         )}
       </GlassCard>
 
-      {modal?.mode === "add" ? (
+      {guardModal?.mode === "add" ? (
         <GuardFormModal
           clientId={null}
           initialGuard={null}
           clients={clients}
-          onClose={() => setModal(null)}
+          onClose={() => setGuardModal(null)}
           onSaved={() => {
-            setModal(null);
+            setGuardModal(null);
             refetch();
           }}
         />
       ) : null}
 
-      {modal?.mode === "edit" ? (
+      {guardModal?.mode === "edit" ? (
         <GuardFormModal
-          clientId={modal.guard.client_id}
-          initialGuard={modal.guard}
+          clientId={guardModal.guard.client_id}
+          initialGuard={guardModal.guard}
           clients={clients}
-          onClose={() => setModal(null)}
+          onClose={() => setGuardModal(null)}
           onSaved={() => {
-            setModal(null);
+            setGuardModal(null);
             refetch();
           }}
         />
       ) : null}
 
-      {bulkOpen ? (
+      {bulkMode ? (
         <BulkImportModal
-          mode="guards"
-          onClose={() => setBulkOpen(false)}
+          mode={bulkMode}
+          onClose={() => setBulkMode(null)}
           onCompleted={() => {
-            setBulkOpen(false);
+            setBulkMode(null);
+            refetch();
+          }}
+        />
+      ) : null}
+
+      {clientModal.open ? (
+        <ClientFormModal
+          initialClient={clientModal.editing}
+          onClose={() => setClientModal({ open: false, editing: null })}
+          onSaved={() => {
+            setClientModal({ open: false, editing: null });
             refetch();
           }}
         />
@@ -485,6 +619,8 @@ function ClientSection({
   count,
   collapsed,
   onToggle,
+  onEditClient,
+  onDeleteClient,
   children,
 }: {
   sectionId: string;
@@ -492,6 +628,8 @@ function ClientSection({
   count: number;
   collapsed: boolean;
   onToggle: () => void;
+  onEditClient: () => void;
+  onDeleteClient: () => void;
   children: ReactNode;
 }) {
   const [hover, setHover] = useState(false);
@@ -569,11 +707,67 @@ function ClientSection({
             >
               {count}
             </span>
+            <span style={{ flex: 1 }} />
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                display: "inline-flex",
+                gap: 14,
+                flexShrink: 0,
+              }}
+            >
+              <SectionAction label="Edit" onClick={onEditClient} />
+              <SectionAction
+                label="Delete"
+                onClick={onDeleteClient}
+                danger
+              />
+            </div>
           </div>
         </td>
       </tr>
       {children}
     </>
+  );
+}
+
+function SectionAction({
+  label,
+  onClick,
+  danger,
+}: {
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+}) {
+  const [hover, setHover] = useState(false);
+  const color = danger
+    ? hover
+      ? "#ef4444"
+      : "rgba(239, 68, 68, 0.7)"
+    : hover
+      ? "#f5f5f7"
+      : "rgba(245, 245, 247, 0.55)";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        background: "transparent",
+        border: "none",
+        padding: 0,
+        fontSize: 12,
+        fontWeight: 500,
+        fontFamily: "inherit",
+        cursor: "pointer",
+        color,
+        transition: "color 150ms ease-out",
+      }}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -673,9 +867,29 @@ function RowAction({
   );
 }
 
-function Empty() {
+function Empty({
+  hasClients,
+  onAddClient,
+  onBulkImportClients,
+}: {
+  hasClients: boolean;
+  onAddClient: () => void;
+  onBulkImportClients: () => void;
+}) {
+  // Two distinct empty states. Without clients, the user can't deploy any
+  // guard yet — make the dependency obvious and point them at the action
+  // that unblocks them.
   return (
-    <div style={{ padding: "48px 24px", textAlign: "center" }}>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 14,
+        padding: "48px 24px",
+        textAlign: "center",
+      }}
+    >
       <h3
         style={{
           fontSize: 16,
@@ -685,21 +899,80 @@ function Empty() {
           margin: 0,
         }}
       >
-        No guards yet
+        {hasClients ? "No guards yet" : "No clients yet"}
       </h3>
       <p
         style={{
-          marginTop: 8,
-          marginBottom: 0,
+          margin: 0,
           fontSize: 13,
           color: "rgba(245, 245, 247, 0.6)",
-          maxWidth: 360,
-          marginInline: "auto",
+          maxWidth: 380,
+          lineHeight: 1.5,
         }}
       >
-        Add your first client (Manage clients), then start adding guards
-        under them.
+        {hasClients
+          ? "Use the Add guard button above to deploy your first guard under an existing client."
+          : "Add a client before you can deploy guards. Guards are always assigned to a client."}
       </p>
+      {!hasClients ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            marginTop: 2,
+            flexWrap: "wrap",
+            justifyContent: "center",
+          }}
+        >
+          <button
+            type="button"
+            onClick={onAddClient}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              background: "linear-gradient(180deg, #D4B670 0%, #C9A961 100%)",
+              color: "#080b12",
+              border: "1px solid rgba(201, 169, 97, 0.4)",
+              borderRadius: 8,
+              padding: "10px 16px",
+              fontWeight: 600,
+              fontSize: 14,
+              fontFamily: "inherit",
+              letterSpacing: "-0.01em",
+              cursor: "pointer",
+            }}
+          >
+            Add client
+          </button>
+          <span
+            style={{
+              fontSize: 12,
+              color: "rgba(245, 245, 247, 0.45)",
+            }}
+          >
+            or{" "}
+            <button
+              type="button"
+              onClick={onBulkImportClients}
+              style={{
+                background: "transparent",
+                border: "none",
+                padding: 0,
+                fontSize: 12,
+                color: "rgba(245, 245, 247, 0.75)",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                textDecoration: "underline",
+                textDecorationColor: "rgba(245, 245, 247, 0.3)",
+              }}
+            >
+              bulk import clients
+            </button>
+          </span>
+        </div>
+      ) : null}
     </div>
   );
 }
