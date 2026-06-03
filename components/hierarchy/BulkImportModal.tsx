@@ -12,7 +12,12 @@ import { Modal } from "@/components/ui/Modal";
 import { CancelButton, FormError, GoldButton } from "@/components/ui/form";
 import { useToast } from "@/components/ui/Toast";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
-import type { Client, ClientType, GuardStatus } from "@/types/database";
+import {
+  deriveFullName,
+  type Client,
+  type ClientType,
+  type GuardStatus,
+} from "@/types/database";
 
 type BulkMode = "clients" | "guards";
 
@@ -24,12 +29,27 @@ type ClientInsert = {
 };
 
 type GuardInsert = {
-  client_id: string;
+  client_id: string | null;
   full_name: string;
-  employee_no: string | null;
-  sosia_license: string | null;
+  first_name: string;
+  middle_name: string | null;
+  last_name: string;
+  birthdate: string | null;
+  birth_place: string | null;
+  address: string | null;
+  educational_attainment: string | null;
+  id_number: string;
+  license_category: string | null;
+  license_no: string | null;
+  license_expiry: string | null;
   contact_no: string | null;
+  emergency_contact_no: string | null;
   date_deployed: string | null;
+  sss: string | null;
+  philhealth: string | null;
+  pagibig: string | null;
+  tin: string | null;
+  deployment_location: string | null;
   status: GuardStatus;
   notes: string | null;
 };
@@ -43,6 +63,8 @@ type ParsedGuardRow =
       index: number;
       ok: true;
       payload: GuardInsert;
+      // Display label for the preview: the matched client name, or
+      // "Unassigned" when the row has no client_name.
       client_name: string;
     }
   | {
@@ -58,8 +80,37 @@ type ParsedRow = ParsedClientRow | ParsedGuardRow;
 // downloads with a worked example the user can crib from.
 const CLIENT_TEMPLATE_CSV =
   "name,type,industry,conglomerate,notes\nSM Megamall,single_post,Retail / Mall,SM Investments,Main lobby + parking\n";
-const GUARD_TEMPLATE_CSV =
-  "client_name,full_name,employee_no,sosia_license,contact_no,date_deployed,status,notes\nSM Megamall,Juan Dela Cruz,GA-0142,SOSIA-12345,0917-000-0000,2026-01-15,active,Prefers night shift\n";
+
+// Header order is contractual — it must match the order the user sees in the
+// downloaded template (spec). full_name is included for round-tripping but is
+// recomputed from the name parts on import (see parseGuardRow).
+const GUARD_CSV_COLUMNS = [
+  "client_name",
+  "id_number",
+  "full_name",
+  "first_name",
+  "middle_name",
+  "last_name",
+  "birthdate",
+  "birth_place",
+  "address",
+  "educational_attainment",
+  "license_category",
+  "license_no",
+  "license_expiry",
+  "contact_no",
+  "emergency_contact_no",
+  "date_deployed",
+  "sss",
+  "philhealth",
+  "pagibig",
+  "tin",
+  "deployment_location",
+  "status",
+  "notes",
+] as const;
+
+const GUARD_TEMPLATE_CSV = `${GUARD_CSV_COLUMNS.join(",")}\nSM Megamall,GA-0142,,Juan,Santos,Dela Cruz,1990-01-15,Quezon City,123 Rizal St Brgy Maligaya,High school graduate,SG,SOSIA-12345,2027-03-01,0917-000-0000,0918-111-2222,2026-01-15,34-1234567-8,12-345678901-2,1234-5678-9012,123-456-789-000,Main lobby,active,Prefers night shift\n`;
 
 const VALID_STATUSES: ReadonlySet<GuardStatus> = new Set<GuardStatus>([
   "active",
@@ -100,8 +151,12 @@ export function BulkImportModal({
   const [parsed, setParsed] = useState<ParsedRow[] | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Guard mode needs the clients list to resolve client_name → client_id.
+  // Guard mode needs the clients list to resolve client_name → client_id, and
+  // the set of id_numbers already in the DB to reject duplicates up front.
   const [clients, setClients] = useState<Client[] | null>(null);
+  const [existingIdNumbers, setExistingIdNumbers] = useState<Set<string>>(
+    new Set(),
+  );
   const { showToast } = useToast();
 
   useEffect(() => {
@@ -109,12 +164,22 @@ export function BulkImportModal({
     let active = true;
     (async () => {
       const supabase = createSupabaseClient();
-      const { data } = await supabase
-        .from("clients")
-        .select("id, name")
-        .order("name", { ascending: true });
+      const [clientsRes, guardsRes] = await Promise.all([
+        supabase
+          .from("clients")
+          .select("id, name")
+          .order("name", { ascending: true }),
+        supabase.from("guards").select("id_number"),
+      ]);
       if (!active) return;
-      setClients((data ?? []) as Client[]);
+      const ids = new Set<string>();
+      for (const g of (guardsRes.data ?? []) as Array<{
+        id_number: string | null;
+      }>) {
+        if (g.id_number) ids.add(g.id_number.trim().toLowerCase());
+      }
+      setExistingIdNumbers(ids);
+      setClients((clientsRes.data ?? []) as Client[]);
     })();
     return () => {
       active = false;
@@ -149,11 +214,20 @@ export function BulkImportModal({
       transformHeader: (h) => h.trim(),
       complete: (result) => {
         const rows = result.data;
+        // Tracks id_numbers seen earlier in this same file so a duplicate
+        // within the CSV flags the *second* (and later) occurrences.
+        const seenIdNumbers = new Set<string>();
         const parsedRows: ParsedRow[] =
           mode === "clients"
             ? rows.map((r, i) => parseClientRow(r, i + 2)) // header is row 1
             : rows.map((r, i) =>
-                parseGuardRow(r, i + 2, clients ?? []),
+                parseGuardRow(
+                  r,
+                  i + 2,
+                  clients ?? [],
+                  existingIdNumbers,
+                  seenIdNumbers,
+                ),
               );
         if (parsedRows.length === 0) {
           setErrorMessage(
@@ -373,7 +447,7 @@ function PickPanel({
           >
             {mode === "clients"
               ? "Columns: name, type, industry, conglomerate, notes"
-              : "Columns: client_name, full_name, employee_no, sosia_license, contact_no, date_deployed, status, notes"}
+              : `Columns: ${GUARD_CSV_COLUMNS.join(", ")}`}
           </div>
         </div>
         <button
@@ -411,10 +485,13 @@ function BulkRules({ mode }: { mode: BulkMode }) {
           "industry, conglomerate, notes are optional.",
         ]
       : [
-          "client_name and full_name are required.",
-          "client_name is resolved case-insensitively against existing clients; unmatched rows go to the error list.",
-          "status accepts active / reliever / on_leave / inactive; anything else (including blank) defaults to active.",
-          "date_deployed must be YYYY-MM-DD or blank.",
+          "id_number, first_name, last_name are required.",
+          "id_number must be unique — both within the file and against existing guards.",
+          "client_name is optional: leave it blank to import the guard as Unassigned. If filled, it's matched case-insensitively to an existing client; unmatched rows go to the error list.",
+          "full_name is recomputed from first_name + middle_name + last_name; the CSV's full_name column is ignored on import.",
+          "status accepts active / reliever / on_leave / inactive; blank defaults to active; any other value is an error.",
+          "birthdate, license_expiry, date_deployed must be YYYY-MM-DD or blank.",
+          "All other columns are optional free text.",
         ];
   return (
     <div
@@ -554,9 +631,9 @@ function validSecondary(
   const r = row as Extract<ParsedGuardRow, { ok: true }>;
   const parts = [
     r.payload.status,
-    r.payload.employee_no ?? "",
-    r.payload.sosia_license ?? "",
-    r.payload.date_deployed ?? "",
+    r.payload.id_number,
+    r.payload.license_no ?? "",
+    r.payload.deployment_location ?? "",
   ].filter(Boolean);
   return parts.join("  ·  ");
 }
@@ -568,7 +645,11 @@ function rawDescription(
   if (mode === "clients") {
     return raw.name ? `name: ${raw.name}` : "row missing name";
   }
-  return [raw.client_name ?? "", raw.full_name ?? ""]
+  const name = [raw.first_name ?? "", raw.last_name ?? ""]
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .join(" ");
+  return [name, raw.id_number ?? "", raw.client_name ?? ""]
     .filter(Boolean)
     .join("  ·  ");
 }
@@ -746,49 +827,123 @@ function parseGuardRow(
   raw: Record<string, string>,
   rowIndex: number,
   clients: Client[],
+  existingIdNumbers: Set<string>,
+  seenIdNumbers: Set<string>,
 ): ParsedGuardRow {
-  const clientName = trimOrNull(raw.client_name);
-  const fullName = trimOrNull(raw.full_name);
-  if (!clientName) {
-    return { index: rowIndex, ok: false, reason: "client_name is required", raw };
-  }
-  if (!fullName) {
-    return { index: rowIndex, ok: false, reason: "full_name is required", raw };
-  }
-  const lowered = clientName.toLowerCase();
-  const match = clients.find((c) => c.name.toLowerCase() === lowered);
-  if (!match) {
-    return {
-      index: rowIndex,
-      ok: false,
-      reason: `client_name "${clientName}" doesn't match any existing client`,
-      raw,
-    };
-  }
-  const rawStatus = (raw.status ?? "").trim().toLowerCase() as GuardStatus;
-  const status: GuardStatus = VALID_STATUSES.has(rawStatus) ? rawStatus : "active";
+  const firstName = trimOrNull(raw.first_name);
+  const lastName = trimOrNull(raw.last_name);
+  const idNumber = trimOrNull(raw.id_number);
 
-  const date = trimOrNull(raw.date_deployed);
-  if (date && !ISO_DATE_RE.test(date)) {
+  if (!idNumber) {
+    return { index: rowIndex, ok: false, reason: "id_number is required", raw };
+  }
+  if (!firstName) {
+    return { index: rowIndex, ok: false, reason: "first_name is required", raw };
+  }
+  if (!lastName) {
+    return { index: rowIndex, ok: false, reason: "last_name is required", raw };
+  }
+
+  // id_number uniqueness — against the DB and against earlier CSV rows.
+  const idKey = idNumber.toLowerCase();
+  if (existingIdNumbers.has(idKey)) {
     return {
       index: rowIndex,
       ok: false,
-      reason: `date_deployed "${date}" must be in YYYY-MM-DD format`,
+      reason: `id_number "${idNumber}" already exists in the system`,
       raw,
     };
   }
+  if (seenIdNumbers.has(idKey)) {
+    return {
+      index: rowIndex,
+      ok: false,
+      reason: `id_number "${idNumber}" is duplicated earlier in this file`,
+      raw,
+    };
+  }
+
+  // client_name is optional: blank → unassigned; non-blank must match.
+  const clientName = trimOrNull(raw.client_name);
+  let clientId: string | null = null;
+  let clientLabel = "Unassigned";
+  if (clientName) {
+    const lowered = clientName.toLowerCase();
+    const match = clients.find((c) => c.name.toLowerCase() === lowered);
+    if (!match) {
+      return {
+        index: rowIndex,
+        ok: false,
+        reason: `client_name "${clientName}" doesn't match any existing client`,
+        raw,
+      };
+    }
+    clientId = match.id;
+    clientLabel = match.name;
+  }
+
+  // status: blank → active; non-blank must match the guard_status enum.
+  const rawStatus = (raw.status ?? "").trim().toLowerCase();
+  if (rawStatus && !VALID_STATUSES.has(rawStatus as GuardStatus)) {
+    return {
+      index: rowIndex,
+      ok: false,
+      reason: `status "${raw.status.trim()}" must be one of active, reliever, on_leave, inactive`,
+      raw,
+    };
+  }
+  const status: GuardStatus = rawStatus ? (rawStatus as GuardStatus) : "active";
+
+  // Optional date fields must parse as YYYY-MM-DD when present.
+  const dateChecks: Array<[string, string | null]> = [
+    ["birthdate", trimOrNull(raw.birthdate)],
+    ["license_expiry", trimOrNull(raw.license_expiry)],
+    ["date_deployed", trimOrNull(raw.date_deployed)],
+  ];
+  for (const [field, val] of dateChecks) {
+    if (val && !ISO_DATE_RE.test(val)) {
+      return {
+        index: rowIndex,
+        ok: false,
+        reason: `${field} "${val}" must be in YYYY-MM-DD format`,
+        raw,
+      };
+    }
+  }
+
+  seenIdNumbers.add(idKey);
 
   return {
     index: rowIndex,
     ok: true,
-    client_name: match.name,
+    client_name: clientLabel,
     payload: {
-      client_id: match.id,
-      full_name: fullName,
-      employee_no: trimOrNull(raw.employee_no),
-      sosia_license: trimOrNull(raw.sosia_license),
+      client_id: clientId,
+      full_name: deriveFullName(
+        firstName,
+        trimOrNull(raw.middle_name),
+        lastName,
+        trimOrNull(raw.full_name),
+      ),
+      first_name: firstName,
+      middle_name: trimOrNull(raw.middle_name),
+      last_name: lastName,
+      birthdate: trimOrNull(raw.birthdate),
+      birth_place: trimOrNull(raw.birth_place),
+      address: trimOrNull(raw.address),
+      educational_attainment: trimOrNull(raw.educational_attainment),
+      id_number: idNumber,
+      license_category: trimOrNull(raw.license_category),
+      license_no: trimOrNull(raw.license_no),
+      license_expiry: trimOrNull(raw.license_expiry),
       contact_no: trimOrNull(raw.contact_no),
-      date_deployed: date,
+      emergency_contact_no: trimOrNull(raw.emergency_contact_no),
+      date_deployed: trimOrNull(raw.date_deployed),
+      sss: trimOrNull(raw.sss),
+      philhealth: trimOrNull(raw.philhealth),
+      pagibig: trimOrNull(raw.pagibig),
+      tin: trimOrNull(raw.tin),
+      deployment_location: trimOrNull(raw.deployment_location),
       status,
       notes: trimOrNull(raw.notes),
     },

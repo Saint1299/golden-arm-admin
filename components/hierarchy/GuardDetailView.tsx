@@ -9,6 +9,7 @@ import { SubjectCompliancePanel } from "@/components/compliance/SubjectComplianc
 import { GuardInventoryPanel } from "@/components/inventory/GuardInventoryPanel";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { useToast } from "@/components/ui/Toast";
+import { ALERT_ACCENT, computeAlertStatus } from "@/lib/compliance";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import type { Client, Guard } from "@/types/database";
 
@@ -253,6 +254,17 @@ function Tabs({
   );
 }
 
+function computeAge(birthdate: string | null): number | null {
+  if (!birthdate) return null;
+  const dob = new Date(`${birthdate}T00:00:00`);
+  if (Number.isNaN(dob.getTime())) return null;
+  const today = new Date();
+  let age = today.getFullYear() - dob.getFullYear();
+  const m = today.getMonth() - dob.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age -= 1;
+  return age >= 0 && age < 150 ? age : null;
+}
+
 function DetailsTab({
   guard,
   client,
@@ -260,8 +272,114 @@ function DetailsTab({
   guard: Guard;
   client: Client | null;
 }) {
+  const age = computeAge(guard.birthdate);
+  const birthdateValue = guard.birthdate
+    ? age !== null
+      ? `${guard.birthdate}  ·  ${age} yrs`
+      : guard.birthdate
+    : null;
+
+  // License expiry takes the same accent rhythm as the compliance board:
+  // expired → red, within 30 days → gold, otherwise plain.
+  const expiryStatus = computeAlertStatus(guard.license_expiry);
+  const expiryValue =
+    guard.license_expiry !== null ? (
+      <span
+        style={{
+          color:
+            expiryStatus === "ok"
+              ? "#f5f5f7"
+              : ALERT_ACCENT[expiryStatus].fg,
+          fontWeight: expiryStatus === "ok" ? 400 : 600,
+        }}
+      >
+        {guard.license_expiry}
+      </span>
+    ) : null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <DetailSection title="Personal info">
+        <DetailItem label="Full name" value={guard.full_name} />
+        <DetailItem label="First name" value={guard.first_name} />
+        <DetailItem label="Middle name" value={guard.middle_name} />
+        <DetailItem label="Last name" value={guard.last_name} />
+        <DetailItem label="Birthdate" value={birthdateValue} tabular />
+        <DetailItem label="Birth place" value={guard.birth_place} />
+        <DetailItem label="Address" value={guard.address} />
+        <DetailItem
+          label="Educational attainment"
+          value={guard.educational_attainment}
+        />
+      </DetailSection>
+
+      <DetailSection title="Government IDs">
+        <DetailItem label="SSS" value={guard.sss} tabular />
+        <DetailItem label="PhilHealth" value={guard.philhealth} tabular />
+        <DetailItem label="Pag-IBIG" value={guard.pagibig} tabular />
+        <DetailItem label="TIN" value={guard.tin} tabular />
+      </DetailSection>
+
+      <DetailSection title="Employment">
+        <DetailItem label="ID number" value={guard.id_number} tabular />
+        <DetailItem
+          label="Client"
+          value={client?.name ?? "Unassigned"}
+        />
+        <DetailItem
+          label="Deployment location"
+          value={guard.deployment_location}
+        />
+        <DetailItem label="Date deployed" value={guard.date_deployed} tabular />
+        <DetailItem
+          label="Status"
+          value={<GuardStatusBadge status={guard.status} />}
+        />
+      </DetailSection>
+
+      <DetailSection title="License">
+        <DetailItem label="License category" value={guard.license_category} />
+        <DetailItem label="License no." value={guard.license_no} tabular />
+        <DetailItem label="License expiry" value={expiryValue} tabular />
+      </DetailSection>
+
+      <DetailSection title="Contact">
+        <DetailItem label="Contact no." value={guard.contact_no} tabular />
+        <DetailItem
+          label="Emergency contact no."
+          value={guard.emergency_contact_no}
+          tabular
+        />
+      </DetailSection>
+
+      <DetailSection title="Notes">
+        <DetailItem label="Notes" value={guard.notes} multiline fullWidth />
+      </DetailSection>
+    </div>
+  );
+}
+
+function DetailSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
   return (
     <GlassCard>
+      <div
+        style={{
+          fontSize: 11,
+          fontWeight: 600,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+          color: "#c9a961",
+          marginBottom: 16,
+        }}
+      >
+        {title}
+      </div>
       <div
         style={{
           display: "grid",
@@ -269,26 +387,8 @@ function DetailsTab({
           gap: "20px 32px",
         }}
       >
-        <DetailItem label="Full name" value={guard.full_name} />
-        <DetailItem label="Employee no." value={guard.employee_no} />
-        <DetailItem label="SOSIA license" value={guard.sosia_license} />
-        <DetailItem label="Contact no." value={guard.contact_no} />
-        <DetailItem label="Date deployed" value={guard.date_deployed} tabular />
-        <DetailItem
-          label="Status"
-          value={<GuardStatusBadge status={guard.status} />}
-        />
-        <DetailItem label="Client" value={client?.name ?? "—"} />
+        {children}
       </div>
-
-      <div
-        style={{
-          height: 1,
-          margin: "24px 0",
-          backgroundColor: "rgba(255, 255, 255, 0.06)",
-        }}
-      />
-      <DetailItem label="Notes" value={guard.notes} multiline />
     </GlassCard>
   );
 }
@@ -298,16 +398,18 @@ function DetailItem({
   value,
   tabular,
   multiline,
+  fullWidth,
 }: {
   label: string;
   value: ReactNode;
   tabular?: boolean;
   multiline?: boolean;
+  fullWidth?: boolean;
 }) {
   const isEmpty =
     value === null || value === undefined || value === "" ? true : false;
   return (
-    <div>
+    <div style={fullWidth ? { gridColumn: "1 / -1" } : undefined}>
       <div
         style={{
           fontSize: 11,

@@ -455,10 +455,10 @@ function SinglePostBody({
               <thead>
                 <tr>
                   <th style={headerCellStyle}>Name</th>
-                  <th style={headerCellStyle}>Employee #</th>
-                  <th style={headerCellStyle}>SOSIA License</th>
+                  <th style={headerCellStyle}>ID Number</th>
+                  <th style={headerCellStyle}>License No</th>
                   <th style={headerCellStyle}>Contact</th>
-                  <th style={headerCellStyle}>Date deployed</th>
+                  <th style={headerCellStyle}>Deployment Location</th>
                   <th style={headerCellStyle}>Status</th>
                   <th
                     style={{
@@ -518,17 +518,15 @@ function GuardRow({
         {guard.full_name}
       </td>
       <td style={bodyCellStyle} className="tabular">
-        {guard.employee_no ?? "—"}
+        {guard.id_number ?? "—"}
       </td>
       <td style={bodyCellStyle} className="tabular">
-        {guard.sosia_license ?? "—"}
+        {guard.license_no ?? "—"}
       </td>
       <td style={bodyCellStyle} className="tabular">
         {guard.contact_no ?? "—"}
       </td>
-      <td style={bodyCellStyle} className="tabular">
-        {guard.date_deployed ?? "—"}
-      </td>
+      <td style={bodyCellStyle}>{guard.deployment_location ?? "—"}</td>
       <td style={bodyCellStyle}>
         <GuardStatusBadge status={guard.status} />
       </td>

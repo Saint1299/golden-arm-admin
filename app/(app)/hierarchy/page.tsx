@@ -39,21 +39,14 @@ export default async function HierarchyPage() {
 
   const rows: GuardDeploymentRow[] = (
     (guardsRes.data ?? []) as RawGuardRow[]
-  ).map((g) => ({
-    id: g.id,
-    client_id: g.client_id,
-    client_name: g.client?.name ?? "Unknown client",
-    client_type: g.client?.type ?? "single_post",
-    org_node_id: g.org_node_id,
-    full_name: g.full_name,
-    employee_no: g.employee_no,
-    sosia_license: g.sosia_license,
-    contact_no: g.contact_no,
-    date_deployed: g.date_deployed,
-    status: g.status,
-    notes: g.notes,
-    created_at: g.created_at,
-  }));
+  ).map((g) => {
+    const { client, ...guard } = g;
+    return {
+      ...guard,
+      client_name: client?.name ?? null,
+      client_type: client?.type ?? null,
+    };
+  });
 
   return (
     <GuardDeploymentTable

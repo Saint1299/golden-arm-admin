@@ -26,25 +26,28 @@ import {
   type GuardStatus,
 } from "@/types/database";
 
-export type GuardDeploymentRow = {
-  id: string;
-  client_id: string;
-  client_name: string;
-  client_type: ClientType;
-  org_node_id: string | null;
-  full_name: string;
-  employee_no: string | null;
-  sosia_license: string | null;
-  contact_no: string | null;
-  date_deployed: string | null;
-  status: GuardStatus;
-  notes: string | null;
-  created_at: string;
+// A full Guard plus the joined client display fields. Carrying the whole
+// Guard means the edit modal prefills every field without a refetch, and
+// client_name/client_type are null for unassigned guards (client_id null).
+export type GuardDeploymentRow = Guard & {
+  client_name: string | null;
+  client_type: ClientType | null;
 };
 
 type RawGuardRow = Guard & {
   client: Pick<Client, "id" | "name" | "type"> | null;
 };
+
+const UNASSIGNED_ID = "__unassigned__";
+
+function toRow(g: RawGuardRow): GuardDeploymentRow {
+  const { client, ...guard } = g;
+  return {
+    ...guard,
+    client_name: client?.name ?? null,
+    client_type: client?.type ?? null,
+  };
+}
 
 const addButtonStyle: CSSProperties = {
   display: "inline-flex",
@@ -117,6 +120,7 @@ export function GuardDeploymentTable({
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<Set<string>>(new Set());
   const [clientFilter, setClientFilter] = useState<Set<string>>(new Set());
+  const [locationFilter, setLocationFilter] = useState<Set<string>>(new Set());
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [guardModal, setGuardModal] = useState<
     | { mode: "add" }
@@ -147,64 +151,86 @@ export function GuardDeploymentTable({
       supabase.from("clients").select("*").order("name", { ascending: true }),
     ]);
     setClients((clientsRes.data ?? []) as Client[]);
-    const next: GuardDeploymentRow[] = (
-      (guardsRes.data ?? []) as RawGuardRow[]
-    ).map(
-      (g) => ({
-        id: g.id,
-        client_id: g.client_id,
-        client_name: g.client?.name ?? "Unknown client",
-        client_type: g.client?.type ?? "single_post",
-        org_node_id: g.org_node_id,
-        full_name: g.full_name,
-        employee_no: g.employee_no,
-        sosia_license: g.sosia_license,
-        contact_no: g.contact_no,
-        date_deployed: g.date_deployed,
-        status: g.status,
-        notes: g.notes,
-        created_at: g.created_at,
-      }),
-    );
-    setRows(next);
+    setRows(((guardsRes.data ?? []) as RawGuardRow[]).map(toRow));
   }, []);
+
+  // Distinct deployment locations across all rows, for the location filter.
+  const locationOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) {
+      if (r.deployment_location) set.add(r.deployment_location);
+    }
+    return Array.from(set)
+      .sort((a, b) => a.localeCompare(b))
+      .map((v) => ({ value: v, label: v }));
+  }, [rows]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return rows.filter((r) => {
       if (statusFilter.size > 0 && !statusFilter.has(r.status)) return false;
-      if (clientFilter.size > 0 && !clientFilter.has(r.client_id))
+      if (
+        clientFilter.size > 0 &&
+        (r.client_id === null || !clientFilter.has(r.client_id))
+      )
+        return false;
+      if (
+        locationFilter.size > 0 &&
+        (r.deployment_location === null ||
+          !locationFilter.has(r.deployment_location))
+      )
         return false;
       if (q) {
-        const hay = `${r.full_name} ${r.employee_no ?? ""} ${r.sosia_license ?? ""}`.toLowerCase();
+        const hay = `${r.full_name} ${r.id_number ?? ""} ${r.license_no ?? ""}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [rows, statusFilter, clientFilter, search]);
+  }, [rows, statusFilter, clientFilter, locationFilter, search]);
 
   // Group filtered guards by client. Sections with zero matching guards
-  // after filters are skipped entirely (spec).
+  // after filters are skipped entirely (spec). Unassigned guards (client_id
+  // null) collect into a single section pinned to the bottom.
   const sections = useMemo(() => {
     const byClient = new Map<
       string,
-      { id: string; name: string; guards: GuardDeploymentRow[] }
+      {
+        id: string;
+        name: string;
+        guards: GuardDeploymentRow[];
+        unassigned?: boolean;
+      }
     >();
+    const unassigned: GuardDeploymentRow[] = [];
     for (const g of filtered) {
+      if (g.client_id === null) {
+        unassigned.push(g);
+        continue;
+      }
       const existing = byClient.get(g.client_id);
       if (existing) {
         existing.guards.push(g);
       } else {
         byClient.set(g.client_id, {
           id: g.client_id,
-          name: g.client_name,
+          name: g.client_name ?? "Unknown client",
           guards: [g],
         });
       }
     }
     const arr = Array.from(byClient.values());
     arr.sort((a, b) => a.name.localeCompare(b.name));
-    for (const s of arr) s.guards.sort((a, b) => a.full_name.localeCompare(b.full_name));
+    for (const s of arr)
+      s.guards.sort((a, b) => a.full_name.localeCompare(b.full_name));
+    if (unassigned.length > 0) {
+      unassigned.sort((a, b) => a.full_name.localeCompare(b.full_name));
+      arr.push({
+        id: UNASSIGNED_ID,
+        name: "Unassigned",
+        guards: unassigned,
+        unassigned: true,
+      });
+    }
     return arr;
   }, [filtered]);
 
@@ -417,7 +443,7 @@ export function GuardDeploymentTable({
         style={{
           display: "grid",
           gridTemplateColumns:
-            "minmax(220px, 1fr) minmax(160px, 220px) minmax(160px, 220px)",
+            "minmax(200px, 1fr) minmax(150px, 200px) minmax(150px, 200px) minmax(150px, 200px)",
           gap: 12,
           marginBottom: 16,
         }}
@@ -428,7 +454,7 @@ export function GuardDeploymentTable({
             id="gp-search"
             value={search}
             onChange={setSearch}
-            placeholder="Name, employee no., SOSIA…"
+            placeholder="Name, ID number, license…"
           />
         </div>
         <div>
@@ -447,6 +473,16 @@ export function GuardDeploymentTable({
             options={clientOptions}
             selected={clientFilter}
             onChange={setClientFilter}
+          />
+        </div>
+        <div>
+          <FilterLabel>Deployment location</FilterLabel>
+          <MultiSelectDropdown
+            label="Location"
+            options={locationOptions}
+            selected={locationFilter}
+            onChange={setLocationFilter}
+            emptyText="All locations"
           />
         </div>
       </div>
@@ -468,11 +504,11 @@ export function GuardDeploymentTable({
               <thead>
                 <tr>
                   <th style={headerCellStyle}>Name</th>
-                  <th style={headerCellStyle}>Employee #</th>
-                  <th style={headerCellStyle}>SOSIA License</th>
-                  <th style={headerCellStyle}>Contact</th>
-                  <th style={headerCellStyle}>Date deployed</th>
+                  <th style={headerCellStyle}>ID Number</th>
+                  <th style={headerCellStyle}>License No</th>
                   <th style={headerCellStyle}>Status</th>
+                  <th style={headerCellStyle}>Contact</th>
+                  <th style={headerCellStyle}>Deployment Location</th>
                   <th
                     style={{
                       ...headerCellStyle,
@@ -492,6 +528,7 @@ export function GuardDeploymentTable({
                       name={section.name}
                       count={section.guards.length}
                       collapsed={isCollapsed}
+                      unassigned={section.unassigned ?? false}
                       onToggle={() => toggleCollapsed(section.id)}
                       onEditClient={() => handleEditClient(section.id)}
                       onDeleteClient={() => handleDeleteClient(section.id)}
@@ -573,19 +610,11 @@ export function GuardDeploymentTable({
 }
 
 function rowToGuard(row: GuardDeploymentRow): Guard {
-  return {
-    id: row.id,
-    client_id: row.client_id,
-    org_node_id: row.org_node_id,
-    full_name: row.full_name,
-    employee_no: row.employee_no,
-    sosia_license: row.sosia_license,
-    contact_no: row.contact_no,
-    date_deployed: row.date_deployed,
-    status: row.status,
-    notes: row.notes,
-    created_at: row.created_at,
-  };
+  // The row IS a Guard plus two joined display fields; strip those.
+  const { client_name: _name, client_type: _type, ...guard } = row;
+  void _name;
+  void _type;
+  return guard;
 }
 
 function FilterLabel({
@@ -618,6 +647,7 @@ function ClientSection({
   name,
   count,
   collapsed,
+  unassigned,
   onToggle,
   onEditClient,
   onDeleteClient,
@@ -627,12 +657,19 @@ function ClientSection({
   name: string;
   count: number;
   collapsed: boolean;
+  unassigned: boolean;
   onToggle: () => void;
   onEditClient: () => void;
   onDeleteClient: () => void;
   children: ReactNode;
 }) {
   const [hover, setHover] = useState(false);
+  // The Unassigned section is deliberately quieter than client sections:
+  // no client link, no edit/delete actions, a muted header tint and a
+  // grey count chip — it reads as a holding bucket, not a real client.
+  const baseBg = unassigned
+    ? "rgba(255, 255, 255, 0.012)"
+    : "rgba(255, 255, 255, 0.025)";
   return (
     <>
       <tr
@@ -642,8 +679,10 @@ function ClientSection({
         style={{
           cursor: "pointer",
           backgroundColor: hover
-            ? "rgba(201, 169, 97, 0.06)"
-            : "rgba(255, 255, 255, 0.025)",
+            ? unassigned
+              ? "rgba(255, 255, 255, 0.04)"
+              : "rgba(201, 169, 97, 0.06)"
+            : baseBg,
           transition: "background-color 150ms ease-out",
         }}
         aria-expanded={!collapsed}
@@ -669,7 +708,7 @@ function ClientSection({
               height="11"
               viewBox="0 0 24 24"
               fill="none"
-              stroke="rgba(245, 245, 247, 0.55)"
+              stroke="rgba(245, 245, 247, 0.4)"
               strokeWidth="2"
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -681,26 +720,42 @@ function ClientSection({
             >
               <polyline points="6 9 12 15 18 9" />
             </svg>
-            <Link
-              href={`/hierarchy/clients/${sectionId}`}
-              onClick={(e) => e.stopPropagation()}
-              style={{
-                color: "#f5f5f7",
-                textDecoration: "none",
-                fontSize: 14,
-                fontWeight: 600,
-                letterSpacing: "-0.01em",
-              }}
-            >
-              {name}
-            </Link>
+            {unassigned ? (
+              <span
+                style={{
+                  color: "rgba(245, 245, 247, 0.55)",
+                  fontSize: 14,
+                  fontWeight: 600,
+                  letterSpacing: "-0.01em",
+                  fontStyle: "italic",
+                }}
+              >
+                {name}
+              </span>
+            ) : (
+              <Link
+                href={`/hierarchy/clients/${sectionId}`}
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  color: "#f5f5f7",
+                  textDecoration: "none",
+                  fontSize: 14,
+                  fontWeight: 600,
+                  letterSpacing: "-0.01em",
+                }}
+              >
+                {name}
+              </Link>
+            )}
             <span
               className="tabular"
               style={{
                 fontSize: 11,
                 fontWeight: 600,
-                backgroundColor: "rgba(201, 169, 97, 0.14)",
-                color: "#d4b670",
+                backgroundColor: unassigned
+                  ? "rgba(255, 255, 255, 0.08)"
+                  : "rgba(201, 169, 97, 0.14)",
+                color: unassigned ? "rgba(245, 245, 247, 0.5)" : "#d4b670",
                 padding: "2px 8px",
                 borderRadius: 999,
               }}
@@ -708,21 +763,33 @@ function ClientSection({
               {count}
             </span>
             <span style={{ flex: 1 }} />
-            <div
-              onClick={(e) => e.stopPropagation()}
-              style={{
-                display: "inline-flex",
-                gap: 14,
-                flexShrink: 0,
-              }}
-            >
-              <SectionAction label="Edit" onClick={onEditClient} />
-              <SectionAction
-                label="Delete"
-                onClick={onDeleteClient}
-                danger
-              />
-            </div>
+            {unassigned ? (
+              <span
+                style={{
+                  fontSize: 11,
+                  color: "rgba(245, 245, 247, 0.35)",
+                  flexShrink: 0,
+                }}
+              >
+                Needs client assignment
+              </span>
+            ) : (
+              <div
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  display: "inline-flex",
+                  gap: 14,
+                  flexShrink: 0,
+                }}
+              >
+                <SectionAction label="Edit" onClick={onEditClient} />
+                <SectionAction
+                  label="Delete"
+                  onClick={onDeleteClient}
+                  danger
+                />
+              </div>
+            )}
           </div>
         </td>
       </tr>
@@ -801,20 +868,18 @@ function GuardRow({
         {guard.full_name}
       </td>
       <td style={bodyCellStyle} className="tabular">
-        {guard.employee_no ?? "—"}
+        {guard.id_number ?? "—"}
       </td>
       <td style={bodyCellStyle} className="tabular">
-        {guard.sosia_license ?? "—"}
-      </td>
-      <td style={bodyCellStyle} className="tabular">
-        {guard.contact_no ?? "—"}
-      </td>
-      <td style={bodyCellStyle} className="tabular">
-        {guard.date_deployed ?? "—"}
+        {guard.license_no ?? "—"}
       </td>
       <td style={bodyCellStyle}>
         <GuardStatusBadge status={guard.status} />
       </td>
+      <td style={bodyCellStyle} className="tabular">
+        {guard.contact_no ?? "—"}
+      </td>
+      <td style={bodyCellStyle}>{guard.deployment_location ?? "—"}</td>
       <td
         style={{ ...bodyCellStyle, textAlign: "right" }}
         onClick={(e) => e.stopPropagation()}

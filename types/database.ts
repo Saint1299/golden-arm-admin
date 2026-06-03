@@ -27,17 +27,62 @@ export type GuardStatus = "active" | "reliever" | "on_leave" | "inactive";
 
 export type Guard = {
   id: string;
-  client_id: string;
+  // Nullable as of migration 0009 — a guard can exist before being assigned
+  // to a client ("Unassigned" on the deployment board).
+  client_id: string | null;
   org_node_id: string | null;
+  // Auto-derived from the name parts on save (see deriveFullName). Kept as a
+  // stored column so existing reads/search/sorts that key on full_name still
+  // work without joining the parts.
   full_name: string;
+  // Personal info (migration 0009)
+  first_name: string | null;
+  middle_name: string | null;
+  last_name: string | null;
+  birthdate: string | null;
+  birth_place: string | null;
+  address: string | null;
+  educational_attainment: string | null;
+  // Employment
+  id_number: string | null;
   employee_no: string | null;
-  sosia_license: string | null;
+  deployment_location: string | null;
+  // License — sosia_license was renamed to license_no in migration 0009.
+  license_category: string | null;
+  license_no: string | null;
+  license_expiry: string | null;
+  // Contact
   contact_no: string | null;
+  emergency_contact_no: string | null;
+  // Government IDs (free text — formats vary)
+  sss: string | null;
+  philhealth: string | null;
+  pagibig: string | null;
+  tin: string | null;
   date_deployed: string | null;
   status: GuardStatus;
   notes: string | null;
   created_at: string;
 };
+
+// Server-side derivation of full_name from the three name parts. Concatenates,
+// collapses whitespace, and trims. Falls back to whatever the caller typed in
+// `fallback` (e.g. a raw full-name string from a CSV) when no parts are given.
+export function deriveFullName(
+  first: string | null | undefined,
+  middle: string | null | undefined,
+  last: string | null | undefined,
+  fallback?: string | null,
+): string {
+  const joined = [first, middle, last]
+    .map((p) => (p ?? "").trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (joined) return joined;
+  return (fallback ?? "").replace(/\s+/g, " ").trim();
+}
 
 export const CLIENT_TYPE_LABEL: Record<ClientType, string> = {
   single_post: "Single Post",
