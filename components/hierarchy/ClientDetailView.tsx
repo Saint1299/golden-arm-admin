@@ -17,7 +17,8 @@ import {
 import { ClientFormModal } from "./ClientFormModal";
 import { DetachmentFormModal } from "./DetachmentFormModal";
 import { ExpiringLicensesBanner, type ExpiringRow } from "./ExpiringLicensesBanner";
-import { SubjectCompliancePanel } from "@/components/compliance/SubjectCompliancePanel";
+import { ClientComplianceAlertPanel } from "@/components/compliance/ClientComplianceAlertPanel";
+import { BackButton } from "@/components/ui/BackButton";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Modal } from "@/components/ui/Modal";
 import {
@@ -175,6 +176,7 @@ export function ClientDetailView({
 
   return (
     <div style={{ maxWidth: 1100 }}>
+      <BackButton href="/hierarchy" label="Back to clients" />
       <Breadcrumb clientName={client.name} />
 
       {/* Header */}
@@ -320,16 +322,9 @@ export function ClientDetailView({
         </>
       ) : null}
 
-      {/* Compliance documents */}
+      {/* Compliance — focused "needs attention" slice; full board at /compliance */}
       <div style={{ height: 32 }} />
-      <SectionHeader title="Compliance documents" />
-      <div style={{ height: 12 }} />
-      <SubjectCompliancePanel
-        subjectScope="client"
-        subjectId={client.id}
-        subjectName={client.name}
-        addButtonLabel="Add document for this client"
-      />
+      <ClientComplianceAlertPanel clientName={client.name} />
 
       {clientEditOpen ? (
         <ClientFormModal

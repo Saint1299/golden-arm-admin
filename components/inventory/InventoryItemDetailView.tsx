@@ -10,6 +10,7 @@ import {
 } from "react";
 import { InventoryStatusBadge } from "./badges";
 import { IssueItemModal } from "./IssueItemModal";
+import { BackButton } from "@/components/ui/BackButton";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { useToast } from "@/components/ui/Toast";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
@@ -155,6 +156,7 @@ export function InventoryItemDetailView({
 
   return (
     <div style={{ maxWidth: 1000 }}>
+      <BackButton href="/inventory" label="Back to inventory" />
       <Breadcrumb itemName={item.asset_code ?? item.name} />
 
       <div

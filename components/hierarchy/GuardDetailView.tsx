@@ -8,6 +8,7 @@ import { GuardAvatar } from "./GuardCard";
 import { GuardFormModal } from "./GuardFormModal";
 import { SubjectCompliancePanel } from "@/components/compliance/SubjectCompliancePanel";
 import { GuardInventoryPanel } from "@/components/inventory/GuardInventoryPanel";
+import { BackButton } from "@/components/ui/BackButton";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { useToast } from "@/components/ui/Toast";
 import { ALERT_ACCENT, computeAlertStatus } from "@/lib/compliance";
@@ -72,6 +73,7 @@ export function GuardDetailView({
 
   return (
     <div style={{ maxWidth: 860 }}>
+      <BackButton onClick={() => router.back()} label="Go back" />
       <Breadcrumb guard={guard} client={client} />
 
       <div

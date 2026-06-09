@@ -15,6 +15,7 @@ import { ExpiringLicensesBanner, type ExpiringRow } from "./ExpiringLicensesBann
 import { GuardAvatar } from "./GuardCard";
 import { GuardFormModal } from "./GuardFormModal";
 import { OrgChartCanvas } from "./OrgChartCanvas";
+import { BackButton } from "@/components/ui/BackButton";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { useToast } from "@/components/ui/Toast";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
@@ -149,6 +150,10 @@ export function DetachmentDetailView({
 
   return (
     <div style={{ maxWidth: 1100 }}>
+      <BackButton
+        href={`/hierarchy/clients/${client.id}`}
+        label="Back to client"
+      />
       <Breadcrumb client={client} detachmentName={detachment.name} />
 
       <div
