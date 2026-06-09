@@ -40,6 +40,7 @@ export function GuardFormModal({
   detachmentId: presetDetachmentId = null,
   orgNodeId: presetOrgNodeId = null,
   lockAssignment = false,
+  presetReliever = false,
   initialGuard,
   clients,
   onClose,
@@ -54,6 +55,8 @@ export function GuardFormModal({
   orgNodeId?: string | null;
   // When true, client + detachment are fixed (opened from a detachment page).
   lockAssignment?: boolean;
+  // Opens with the reliever checkbox pre-checked (the "Add reliever" button).
+  presetReliever?: boolean;
   initialGuard: Guard | null;
   clients: Client[];
   onClose: () => void;
@@ -94,6 +97,9 @@ export function GuardFormModal({
   );
   const [dateDeployed, setDateDeployed] = useState(
     initialGuard?.date_deployed ?? "",
+  );
+  const [isReliever, setIsReliever] = useState(
+    initialGuard?.is_reliever ?? presetReliever,
   );
   const [status, setStatus] = useState<GuardStatus>(
     initialGuard?.status ?? "active",
@@ -285,9 +291,13 @@ export function GuardFormModal({
       detachment_id: detachmentId ? detachmentId : null,
       // Editing preserves the guard's existing node; a new guard added from a
       // chart tile is assigned to the preset node.
-      org_node_id: initialGuard
-        ? initialGuard.org_node_id ?? null
-        : presetOrgNodeId ?? null,
+      // Relievers never hold a tree position; clear org_node_id when reliever.
+      org_node_id: isReliever
+        ? null
+        : initialGuard
+          ? initialGuard.org_node_id ?? null
+          : presetOrgNodeId ?? null,
+      is_reliever: isReliever,
       full_name: fullName,
       first_name: firstName.trim(),
       middle_name: middleName.trim() ? middleName.trim() : null,
@@ -512,6 +522,65 @@ export function GuardFormModal({
         </Section>
 
         <Section title="Assignment">
+          <button
+            type="button"
+            onClick={() => setIsReliever((v) => !v)}
+            disabled={saving}
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 10,
+              width: "100%",
+              textAlign: "left",
+              background: "transparent",
+              border: "none",
+              padding: 0,
+              marginBottom: 16,
+              cursor: saving ? "not-allowed" : "pointer",
+              fontFamily: "inherit",
+            }}
+          >
+            <span
+              aria-hidden
+              style={{
+                marginTop: 1,
+                flexShrink: 0,
+                width: 18,
+                height: 18,
+                borderRadius: 5,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: isReliever
+                  ? "rgba(201, 169, 97, 0.2)"
+                  : "rgba(255, 255, 255, 0.04)",
+                border: `1px solid ${isReliever ? "rgba(201, 169, 97, 0.6)" : "rgba(255, 255, 255, 0.18)"}`,
+              }}
+            >
+              {isReliever ? (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#d4b670" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              ) : null}
+            </span>
+            <span>
+              <span style={{ fontSize: 14, color: "#f5f5f7", fontWeight: 500 }}>
+                Mark as reliever (standby, not in org chart)
+              </span>
+              <span
+                style={{
+                  display: "block",
+                  marginTop: 2,
+                  fontSize: 11,
+                  color: "rgba(245, 245, 247, 0.45)",
+                }}
+              >
+                Relievers live in the detachment’s Relievers strip and aren’t
+                placed in the org tree.
+              </span>
+            </span>
+          </button>
+
           {clientLocked ? (
             <Row>
               <Field label="Client">

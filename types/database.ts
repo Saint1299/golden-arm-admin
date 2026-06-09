@@ -23,6 +23,8 @@ export type Detachment = {
   created_at: string;
 };
 
+export type Shift = "day" | "night";
+
 export type OrgNode = {
   id: string;
   // Nullable as of migration 0010 — new org nodes hang off a detachment, not
@@ -39,6 +41,8 @@ export type OrgNode = {
   is_detached: boolean;
   pos_x: number | null;
   pos_y: number | null;
+  // Shift this position applies to (migration 0011). null = any / all shifts.
+  shift: Shift | null;
   created_at: string;
 };
 
@@ -69,6 +73,9 @@ export type Guard = {
   // Assignment (migration 0010). detachment_id nullable — a guard can be
   // unassigned, assigned to a client only, or assigned to a detachment.
   detachment_id: string | null;
+  // Standby reliever (migration 0011) — lives in the detachment's Relievers
+  // strip, not in the org tree (org_node_id is cleared when this is true).
+  is_reliever: boolean;
   // Storage path (bucket-relative) in the private guard-photos bucket, or a
   // legacy http(s) URL. Display goes through a short-lived signed URL.
   photo_url: string | null;

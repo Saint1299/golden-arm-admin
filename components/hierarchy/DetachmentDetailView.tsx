@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   useCallback,
   useMemo,
@@ -12,12 +12,13 @@ import { DetachmentTypeBadge, GuardStatusBadge } from "./badges";
 import { BulkImportModal } from "./BulkImportModal";
 import { DetachmentFormModal } from "./DetachmentFormModal";
 import { ExpiringLicensesBanner, type ExpiringRow } from "./ExpiringLicensesBanner";
-import { GuardAvatar } from "./GuardCard";
+import { GuardAvatar, GuardPhotoBlock } from "./GuardCard";
 import { GuardFormModal } from "./GuardFormModal";
 import { OrgChartCanvas } from "./OrgChartCanvas";
 import { BackButton } from "@/components/ui/BackButton";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { useToast } from "@/components/ui/Toast";
+import { getGuardPhotoSignedUrlMap } from "@/lib/guard-photo-storage";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import { expiringGuards } from "@/lib/license";
 import type {
@@ -25,6 +26,7 @@ import type {
   Detachment,
   Guard,
   OrgNode,
+  Shift,
 } from "@/types/database";
 
 const secondaryButtonStyle: CSSProperties = {
@@ -71,15 +73,32 @@ export function DetachmentDetailView({
   photoUrlByGuardId: Record<string, string>;
 }) {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const { showToast } = useToast();
   const [detachment, setDetachment] = useState<Detachment>(initialDetachment);
   const [guards, setGuards] = useState<Guard[]>(initialGuards);
+  const [photoUrls, setPhotoUrls] =
+    useState<Record<string, string>>(photoUrlByGuardId);
   const [editOpen, setEditOpen] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [guardModal, setGuardModal] = useState<{
     open: boolean;
     editing: Guard | null;
+    reliever?: boolean;
   }>({ open: false, editing: null });
+
+  const shiftParam = searchParams.get("shift");
+  const activeShift: Shift | "all" =
+    shiftParam === "day" || shiftParam === "night" ? shiftParam : "all";
+
+  function setShiftTab(next: Shift | "all") {
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === "all") params.delete("shift");
+    else params.set("shift", next);
+    const qs = params.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }
 
   const refetch = useCallback(async () => {
     const supabase = createSupabaseClient();
@@ -96,8 +115,24 @@ export function DetachmentDetailView({
         .order("full_name", { ascending: true }),
     ]);
     if (detRes.data) setDetachment(detRes.data as Detachment);
-    setGuards((guardsRes.data ?? []) as Guard[]);
+    const nextGuards = (guardsRes.data ?? []) as Guard[];
+    setGuards(nextGuards);
+    // Re-sign photos so newly added relievers/guards render their pictures.
+    const byPath = await getGuardPhotoSignedUrlMap(
+      supabase,
+      nextGuards.map((g) => g.photo_url),
+    );
+    const byId: Record<string, string> = {};
+    for (const g of nextGuards) {
+      if (g.photo_url && byPath[g.photo_url]) byId[g.id] = byPath[g.photo_url];
+    }
+    setPhotoUrls(byId);
   }, [detachment.id]);
+
+  const relievers = useMemo(
+    () => guards.filter((g) => g.is_reliever),
+    [guards],
+  );
 
   const expiringRows: ExpiringRow[] = useMemo(
     () =>
@@ -245,22 +280,36 @@ export function DetachmentDetailView({
 
       {isSinglePost ? (
         <SinglePostBody
-          guards={guards}
-          photoUrlByGuardId={photoUrlByGuardId}
+          guards={guards.filter((g) => !g.is_reliever)}
+          photoUrlByGuardId={photoUrls}
           onAddGuard={() => setGuardModal({ open: true, editing: null })}
           onEditGuard={(g) => setGuardModal({ open: true, editing: g })}
           onReplaceGuard={handleReplaceGuard}
         />
       ) : (
-        <OrgChartCanvas
-          detachmentId={detachment.id}
-          clientId={client.id}
-          clients={clients}
-          initialNodes={initialNodes}
-          initialGuards={initialGuards}
-          photoUrlByGuardId={photoUrlByGuardId}
-        />
+        <>
+          <ShiftTabs active={activeShift} onChange={setShiftTab} />
+          <OrgChartCanvas
+            detachmentId={detachment.id}
+            clientId={client.id}
+            clients={clients}
+            initialNodes={initialNodes}
+            initialGuards={initialGuards}
+            photoUrlByGuardId={photoUrlByGuardId}
+            activeShift={activeShift}
+            onGuardsChanged={refetch}
+          />
+        </>
       )}
+
+      <div style={{ height: 32 }} />
+      <RelieverStrip
+        relievers={relievers}
+        photoUrls={photoUrls}
+        onAddReliever={() =>
+          setGuardModal({ open: true, editing: null, reliever: true })
+        }
+      />
 
       {bulkOpen ? (
         <BulkImportModal
@@ -290,6 +339,7 @@ export function DetachmentDetailView({
           clientId={client.id}
           detachmentId={detachment.id}
           lockAssignment={guardModal.editing === null}
+          presetReliever={guardModal.reliever ?? false}
           initialGuard={guardModal.editing}
           clients={clients}
           onClose={() => setGuardModal({ open: false, editing: null })}
@@ -300,6 +350,233 @@ export function DetachmentDetailView({
         />
       ) : null}
     </div>
+  );
+}
+
+function ShiftTabs({
+  active,
+  onChange,
+}: {
+  active: Shift | "all";
+  onChange: (s: Shift | "all") => void;
+}) {
+  const tabs: Array<{ key: Shift | "all"; label: string }> = [
+    { key: "all", label: "All" },
+    { key: "day", label: "Day shift" },
+    { key: "night", label: "Night shift" },
+  ];
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 4,
+        marginBottom: 16,
+        borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
+      }}
+    >
+      {tabs.map((tab) => {
+        const isActive = tab.key === active;
+        return (
+          <button
+            key={tab.key}
+            type="button"
+            onClick={() => onChange(tab.key)}
+            style={{
+              position: "relative",
+              background: "transparent",
+              border: "none",
+              padding: "10px 16px",
+              fontSize: 14,
+              fontWeight: 500,
+              fontFamily: "inherit",
+              cursor: "pointer",
+              color: isActive ? "#f5f5f7" : "rgba(245, 245, 247, 0.5)",
+              transition: "color 200ms ease-out",
+            }}
+          >
+            {tab.label}
+            {isActive ? (
+              <span
+                aria-hidden
+                style={{
+                  position: "absolute",
+                  left: 12,
+                  right: 12,
+                  bottom: -1,
+                  height: 2,
+                  backgroundColor: "#c9a961",
+                  borderRadius: "2px 2px 0 0",
+                }}
+              />
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function RelieverStrip({
+  relievers,
+  photoUrls,
+  onAddReliever,
+}: {
+  relievers: Guard[];
+  photoUrls: Record<string, string>;
+  onAddReliever: () => void;
+}) {
+  return (
+    <div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 16,
+          marginBottom: 12,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <h2
+            style={{
+              fontSize: 16,
+              fontWeight: 600,
+              color: "#f5f5f7",
+              letterSpacing: "-0.01em",
+              margin: 0,
+            }}
+          >
+            Relievers
+          </h2>
+          <span
+            className="tabular"
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              backgroundColor: "rgba(201, 169, 97, 0.14)",
+              color: "#d4b670",
+              padding: "2px 8px",
+              borderRadius: 999,
+            }}
+          >
+            {relievers.length}
+          </span>
+        </div>
+        <button type="button" style={secondaryButtonStyle} onClick={onAddReliever}>
+          + Add reliever
+        </button>
+      </div>
+
+      {relievers.length === 0 ? (
+        <GlassCard>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 12,
+              padding: "24px 16px",
+              fontSize: 13,
+              color: "rgba(245, 245, 247, 0.5)",
+            }}
+          >
+            No relievers assigned.
+          </div>
+        </GlassCard>
+      ) : (
+        <div
+          style={{
+            display: "flex",
+            gap: 12,
+            overflowX: "auto",
+            paddingBottom: 6,
+          }}
+        >
+          {relievers.map((g) => (
+            <RelieverCard
+              key={g.id}
+              guard={g}
+              photoUrl={photoUrls[g.id] ?? null}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RelieverCard({
+  guard,
+  photoUrl,
+}: {
+  guard: Guard;
+  photoUrl: string | null;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <Link
+      href={`/hierarchy/guards/${guard.id}`}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        flexShrink: 0,
+        width: 220,
+        height: 110,
+        display: "flex",
+        textDecoration: "none",
+        overflow: "hidden",
+        borderRadius: 10,
+        borderTop: "2px solid #c9a961",
+        border: `1px solid ${hover ? "rgba(201, 169, 97, 0.4)" : "rgba(255, 255, 255, 0.1)"}`,
+        backgroundColor: hover
+          ? "rgba(255, 255, 255, 0.05)"
+          : "rgba(255, 255, 255, 0.03)",
+        transition: "border-color 150ms ease-out, background-color 150ms ease-out",
+      }}
+    >
+      <div style={{ width: 80, flexShrink: 0, overflow: "hidden" }}>
+        <GuardPhotoBlock name={guard.full_name} photoUrl={photoUrl} />
+      </div>
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          padding: "10px 12px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 3,
+        }}
+      >
+        <div
+          style={{
+            fontSize: 14,
+            fontWeight: 500,
+            color: "#f5f5f7",
+            letterSpacing: "-0.01em",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {guard.full_name}
+        </div>
+        <div
+          className="tabular"
+          style={{
+            fontSize: 11,
+            color: "rgba(245, 245, 247, 0.5)",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {guard.license_no ?? "No license"}
+        </div>
+        <div style={{ marginTop: "auto" }}>
+          <GuardStatusBadge status={guard.status} />
+        </div>
+      </div>
+    </Link>
   );
 }
 

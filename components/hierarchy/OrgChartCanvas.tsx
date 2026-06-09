@@ -21,6 +21,7 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
+import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
 import { GuardStatusBadge } from "./badges";
 import { GuardAvatar, GuardPhotoBlock } from "./GuardCard";
 import { GuardFormModal } from "./GuardFormModal";
@@ -36,14 +37,7 @@ import { useToast } from "@/components/ui/Toast";
 import { ALERT_ACCENT, computeAlertStatus, daysRemaining } from "@/lib/compliance";
 import { getGuardPhotoSignedUrlMap } from "@/lib/guard-photo-storage";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
-import type { Client, Guard, OrgNode } from "@/types/database";
-
-const DEFAULT_CHAIN: Array<{ label: string; level: number }> = [
-  { label: "Detachment Commander", level: 0 },
-  { label: "Shift In-Charge", level: 1 },
-  { label: "Senior Guard", level: 2 },
-  { label: "Guard", level: 3 },
-];
+import type { Client, Guard, OrgNode, Shift } from "@/types/database";
 
 const NODE_PREFIX = "node:";
 const GUARD_PREFIX = "guard:";
@@ -109,6 +103,8 @@ export function OrgChartCanvas({
   initialNodes,
   initialGuards,
   photoUrlByGuardId,
+  activeShift = "all",
+  onGuardsChanged,
 }: {
   detachmentId: string;
   clientId: string;
@@ -116,6 +112,11 @@ export function OrgChartCanvas({
   initialNodes: OrgNode[];
   initialGuards: Guard[];
   photoUrlByGuardId: Record<string, string>;
+  // "all" shows every node; a shift filters to that shift + any/null nodes.
+  activeShift?: Shift | "all";
+  // Notifies the parent (detachment page) when guard data changed here, so the
+  // Relievers strip can re-sync (e.g. a guard toggled to/from reliever).
+  onGuardsChanged?: () => void;
 }) {
   const [nodes, setNodes] = useState<OrgNode[]>(initialNodes);
   const [guards, setGuards] = useState<Guard[]>(initialGuards);
@@ -143,7 +144,30 @@ export function OrgChartCanvas({
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
 
-  const autoPositions = useMemo(() => computeAutoPositions(nodes), [nodes]);
+  // Nodes visible under the active shift. A node is hidden if its own shift
+  // is the opposite of the active shift, OR any ancestor is hidden (so an
+  // excluded node takes its whole subtree with it). null/any nodes always show.
+  const visibleNodes = useMemo(() => {
+    if (activeShift === "all") return nodes;
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const cache = new Map<string, boolean>();
+    function visible(n: OrgNode): boolean {
+      const c = cache.get(n.id);
+      if (c !== undefined) return c;
+      let ok = n.shift === null || n.shift === activeShift;
+      if (ok && n.parent_node_id && byId.has(n.parent_node_id)) {
+        ok = visible(byId.get(n.parent_node_id)!);
+      }
+      cache.set(n.id, ok);
+      return ok;
+    }
+    return nodes.filter(visible);
+  }, [nodes, activeShift]);
+
+  const autoPositions = useMemo(
+    () => computeAutoPositions(visibleNodes),
+    [visibleNodes],
+  );
 
   function renderPos(node: OrgNode): XY {
     if (node.pos_x !== null && node.pos_y !== null) {
@@ -163,8 +187,10 @@ export function OrgChartCanvas({
     return m;
   }, [guards]);
 
+  // Unassigned = not in the tree AND not a reliever (relievers have their own
+  // strip on the detachment page — three mutually exclusive buckets).
   const unassignedGuards = useMemo(
-    () => guards.filter((g) => !g.org_node_id),
+    () => guards.filter((g) => !g.org_node_id && !g.is_reliever),
     [guards],
   );
 
@@ -172,9 +198,9 @@ export function OrgChartCanvas({
   // an orthogonal elbow. Works regardless of whether either endpoint is auto
   // or manually positioned.
   const connectors = useMemo(() => {
-    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const byId = new Map(visibleNodes.map((n) => [n.id, n]));
     const segs: Array<{ id: string; from: XY; to: XY }> = [];
-    for (const n of nodes) {
+    for (const n of visibleNodes) {
       const pid = n.parent_node_id;
       if (!pid || !byId.has(pid)) continue;
       const p = renderPos(byId.get(pid)!);
@@ -187,12 +213,12 @@ export function OrgChartCanvas({
     }
     return segs;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, autoPositions]);
+  }, [visibleNodes, autoPositions]);
 
   const bounds = useMemo(() => {
     let maxX = 0;
     let maxY = 0;
-    for (const n of nodes) {
+    for (const n of visibleNodes) {
       const p = renderPos(n);
       maxX = Math.max(maxX, p.x + TILE_W);
       maxY = Math.max(maxY, p.y + TILE_H);
@@ -202,7 +228,7 @@ export function OrgChartCanvas({
       h: Math.max(maxY + PAD, CANVAS_MIN_HEIGHT),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, autoPositions]);
+  }, [visibleNodes, autoPositions]);
 
   useEffect(() => {
     if (nodes.length > 0 || didSeed.current) return;
@@ -238,34 +264,55 @@ export function OrgChartCanvas({
       if (g.photo_url && byPath[g.photo_url]) byId[g.id] = byPath[g.photo_url];
     }
     setPhotoUrls(byId);
+    onGuardsChanged?.();
   }
 
+  // New detachments seed a Commander (any shift) with a Day and a Night
+  // Shift In-Charge beneath it. Senior/Guard rows are left for the user.
   async function seedDefaultChain() {
     setSeeding(true);
     const supabase = createSupabaseClient();
-    let parentId: string | null = null;
-    for (const step of DEFAULT_CHAIN) {
-      const { data, error } = await supabase
-        .from("org_nodes")
-        .insert({
-          detachment_id: detachmentId,
-          client_id: null,
-          parent_node_id: parentId,
-          label: step.label,
-          level: step.level,
-          sort_order: 0,
-          is_detached: false,
-          pos_x: null,
-          pos_y: null,
-        })
-        .select("id")
-        .single();
-      if (error || !data) {
-        showToast(error?.message ?? "Failed to set up org chart", "error");
-        break;
-      }
-      parentId = data.id as string;
+    const { data: commander, error: cmdErr } = await supabase
+      .from("org_nodes")
+      .insert({
+        detachment_id: detachmentId,
+        client_id: null,
+        parent_node_id: null,
+        label: "Detachment Commander",
+        level: 0,
+        sort_order: 0,
+        is_detached: false,
+        pos_x: null,
+        pos_y: null,
+        shift: null,
+      })
+      .select("id")
+      .single();
+    if (cmdErr || !commander) {
+      showToast(cmdErr?.message ?? "Failed to set up org chart", "error");
+      await refetch();
+      setSeeding(false);
+      return;
     }
+    const branch: Array<{ label: string; shift: Shift; sort: number }> = [
+      { label: "Day Shift In-Charge", shift: "day", sort: 0 },
+      { label: "Night Shift In-Charge", shift: "night", sort: 1 },
+    ];
+    const { error: branchErr } = await supabase.from("org_nodes").insert(
+      branch.map((b) => ({
+        detachment_id: detachmentId,
+        client_id: null,
+        parent_node_id: commander.id as string,
+        label: b.label,
+        level: 1,
+        sort_order: b.sort,
+        is_detached: false,
+        pos_x: null,
+        pos_y: null,
+        shift: b.shift,
+      })),
+    );
+    if (branchErr) showToast(branchErr.message, "error");
     await refetch();
     setSeeding(false);
   }
@@ -307,6 +354,8 @@ export function OrgChartCanvas({
       is_detached: false,
       pos_x: null,
       pos_y: null,
+      // New positions inherit the shift of the position they attach under.
+      shift: parent?.shift ?? null,
     });
     setBusy(false);
     if (error) {
@@ -408,6 +457,22 @@ export function OrgChartCanvas({
     }
     setEditNode(null);
     showToast("Reset to auto layout", "success");
+    await refetch();
+  }
+
+  async function handleSetShift(node: OrgNode, shift: Shift | null) {
+    // Optimistically reflect in the open editor; the modal stays open.
+    setEditNode((prev) =>
+      prev && prev.id === node.id ? { ...prev, shift } : prev,
+    );
+    const supabase = createSupabaseClient();
+    const { error } = await supabase
+      .from("org_nodes")
+      .update({ shift })
+      .eq("id", node.id);
+    if (error) {
+      showToast(error.message, "error");
+    }
     await refetch();
   }
 
@@ -623,52 +688,33 @@ export function OrgChartCanvas({
               }}
               disabled={busy}
             />
+          ) : activeShift === "all" ? (
+            // All tab → zoom + pan. cmd/ctrl-wheel zooms; plain wheel scrolls;
+            // drag empty canvas pans; tiles are excluded so their dnd-kit drag
+            // (reposition) and click (edit) keep working.
+            <ZoomPanCanvas>
+              <ChartInner
+                bounds={bounds}
+                connectors={connectors}
+                visibleNodes={visibleNodes}
+                renderPos={renderPos}
+                guardsByNode={guardsByNode}
+                photoUrls={photoUrls}
+                onOpen={openEditor}
+              />
+            </ZoomPanCanvas>
           ) : (
+            // Shift tabs → simple scroll, no zoom.
             <div style={{ overflow: "auto", maxHeight: "75vh" }}>
-              <div
-                style={{
-                  position: "relative",
-                  width: bounds.w,
-                  height: bounds.h,
-                }}
-              >
-                <svg
-                  width={bounds.w}
-                  height={bounds.h}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    pointerEvents: "none",
-                    zIndex: 0,
-                  }}
-                  aria-hidden
-                >
-                  {connectors.map((seg) => {
-                    const midY = seg.from.y + (seg.to.y - seg.from.y) / 2;
-                    return (
-                      <path
-                        key={seg.id}
-                        d={`M ${seg.from.x} ${seg.from.y} L ${seg.from.x} ${midY} L ${seg.to.x} ${midY} L ${seg.to.x} ${seg.to.y}`}
-                        fill="none"
-                        stroke="rgba(255, 255, 255, 0.18)"
-                        strokeWidth={1.5}
-                      />
-                    );
-                  })}
-                </svg>
-
-                {nodes.map((n) => (
-                  <NodeTile
-                    key={n.id}
-                    node={n}
-                    pos={renderPos(n)}
-                    guards={guardsByNode.get(n.id) ?? []}
-                    photoUrls={photoUrls}
-                    onOpen={() => openEditor(n)}
-                  />
-                ))}
-              </div>
+              <ChartInner
+                bounds={bounds}
+                connectors={connectors}
+                visibleNodes={visibleNodes}
+                renderPos={renderPos}
+                guardsByNode={guardsByNode}
+                photoUrls={photoUrls}
+                onOpen={openEditor}
+              />
             </div>
           )}
         </GlassCard>
@@ -692,6 +738,7 @@ export function OrgChartCanvas({
           onAddChild={(label) => handleAddChild(editNode, label)}
           onAddSibling={(label) => handleAddSibling(editNode, label)}
           onChangeParent={(pid) => handleChangeParent(editNode.id, pid)}
+          onSetShift={(shift) => handleSetShift(editNode, shift)}
           onResetLayout={() => handleResetLayout(editNode)}
           onDelete={() => handleDelete(editNode)}
           onEditGuard={(g) => {
@@ -725,6 +772,193 @@ export function OrgChartCanvas({
         />
       ) : null}
     </div>
+  );
+}
+
+// The positioned canvas (connectors + tiles). Shared by the zoom/pan path
+// (All tab) and the scroll-only path (shift tabs).
+function ChartInner({
+  bounds,
+  connectors,
+  visibleNodes,
+  renderPos,
+  guardsByNode,
+  photoUrls,
+  onOpen,
+}: {
+  bounds: { w: number; h: number };
+  connectors: Array<{ id: string; from: XY; to: XY }>;
+  visibleNodes: OrgNode[];
+  renderPos: (n: OrgNode) => XY;
+  guardsByNode: Map<string, Guard[]>;
+  photoUrls: Record<string, string>;
+  onOpen: (n: OrgNode) => void;
+}) {
+  return (
+    <div style={{ position: "relative", width: bounds.w, height: bounds.h }}>
+      <svg
+        width={bounds.w}
+        height={bounds.h}
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          pointerEvents: "none",
+          zIndex: 0,
+        }}
+        aria-hidden
+      >
+        {connectors.map((seg) => {
+          const midY = seg.from.y + (seg.to.y - seg.from.y) / 2;
+          return (
+            <path
+              key={seg.id}
+              d={`M ${seg.from.x} ${seg.from.y} L ${seg.from.x} ${midY} L ${seg.to.x} ${midY} L ${seg.to.x} ${seg.to.y}`}
+              fill="none"
+              stroke="rgba(255, 255, 255, 0.18)"
+              strokeWidth={1.5}
+            />
+          );
+        })}
+      </svg>
+
+      {visibleNodes.map((n) => (
+        <NodeTile
+          key={n.id}
+          node={n}
+          pos={renderPos(n)}
+          guards={guardsByNode.get(n.id) ?? []}
+          photoUrls={photoUrls}
+          onOpen={() => onOpen(n)}
+        />
+      ))}
+    </div>
+  );
+}
+
+// Zoom/pan wrapper used only on the All tab.
+function ZoomPanCanvas({ children }: { children: ReactNode }) {
+  const [pct, setPct] = useState(100);
+  return (
+    <div style={{ position: "relative" }}>
+      <TransformWrapper
+        minScale={0.3}
+        maxScale={1.5}
+        initialScale={1}
+        doubleClick={{ disabled: true }}
+        // Plain wheel passes through (native scroll); only cmd/ctrl-wheel zooms.
+        wheel={{ step: 0.15, activationKeys: ["Meta", "Control"] }}
+        // Tiles are excluded so a drag that starts on a tile is handled by
+        // dnd-kit (reposition), not the pan. Empty-canvas drag pans.
+        panning={{ excluded: ["ga-tile"] }}
+        onTransform={(_ref, state) => setPct(Math.round(state.scale * 100))}
+      >
+        {({ zoomIn, zoomOut, resetTransform }) => (
+          <>
+            <div
+              style={{
+                position: "absolute",
+                top: 10,
+                right: 10,
+                zIndex: 6,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: 4,
+                borderRadius: 10,
+                backgroundColor: "rgba(8, 11, 18, 0.7)",
+                border: "1px solid rgba(255, 255, 255, 0.1)",
+                backdropFilter: "blur(8px)",
+              }}
+            >
+              <ZoomButton label="Zoom out" onClick={() => zoomOut()}>
+                −
+              </ZoomButton>
+              <span
+                className="tabular"
+                style={{
+                  minWidth: 38,
+                  textAlign: "center",
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  color: "rgba(245, 245, 247, 0.7)",
+                }}
+              >
+                {pct}%
+              </span>
+              <ZoomButton label="Zoom in" onClick={() => zoomIn()}>
+                +
+              </ZoomButton>
+              <ZoomButton label="Fit / reset" onClick={() => resetTransform()}>
+                <svg
+                  width="13"
+                  height="13"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                >
+                  <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                  <polyline points="9 22 9 12 15 12 15 22" />
+                </svg>
+              </ZoomButton>
+            </div>
+            <TransformComponent
+              wrapperStyle={{
+                width: "100%",
+                maxHeight: "75vh",
+                overflow: "auto",
+              }}
+            >
+              {children}
+            </TransformComponent>
+          </>
+        )}
+      </TransformWrapper>
+    </div>
+  );
+}
+
+function ZoomButton({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      aria-label={label}
+      title={label}
+      style={{
+        width: 26,
+        height: 26,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: 7,
+        fontSize: 16,
+        fontWeight: 600,
+        fontFamily: "inherit",
+        cursor: "pointer",
+        background: hover ? "rgba(201, 169, 97, 0.12)" : "rgba(255, 255, 255, 0.04)",
+        border: `1px solid ${hover ? "rgba(201, 169, 97, 0.45)" : "rgba(255, 255, 255, 0.1)"}`,
+        color: hover ? "#d4b670" : "rgba(245, 245, 247, 0.7)",
+        transition: "color 150ms ease-out, background-color 150ms ease-out, border-color 150ms ease-out",
+      }}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -907,6 +1141,7 @@ function NodeTile({
   return (
     <div
       ref={setRef}
+      className="ga-tile"
       {...draggable.attributes}
       {...draggable.listeners}
       onClick={onOpen}
@@ -1199,6 +1434,7 @@ function NodeEditModal({
   onAddChild,
   onAddSibling,
   onChangeParent,
+  onSetShift,
   onResetLayout,
   onDelete,
   onEditGuard,
@@ -1216,6 +1452,7 @@ function NodeEditModal({
   onAddChild: (label: string) => void;
   onAddSibling: (label: string) => void;
   onChangeParent: (parentId: string | null) => void;
+  onSetShift: (shift: Shift | null) => void;
   onResetLayout: () => void;
   onDelete: () => void;
   onEditGuard: (g: Guard) => void;
@@ -1251,6 +1488,24 @@ function NodeEditModal({
             disabled={busy || !label.trim() || label.trim() === node.label}
           />
         </div>
+      </Field>
+
+      <Field
+        label="Shift"
+        htmlFor="node-shift"
+        helper="Which shift tab this position appears on. Any shift shows on all tabs."
+      >
+        <SelectInput
+          id="node-shift"
+          value={node.shift ?? ""}
+          onChange={(v) => onSetShift(v === "" ? null : (v as Shift))}
+          options={[
+            { value: "", label: "Any shift" },
+            { value: "day", label: "Day shift" },
+            { value: "night", label: "Night shift" },
+          ]}
+          disabled={busy}
+        />
       </Field>
 
       <Field
