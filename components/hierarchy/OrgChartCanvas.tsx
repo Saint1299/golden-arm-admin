@@ -1,6 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import {
   DndContext,
   PointerSensor,
@@ -13,16 +21,23 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { restrictToWindowEdges } from "@dnd-kit/modifiers";
-import { NodeFormModal } from "./NodeFormModal";
+import { GuardStatusBadge } from "./badges";
+import { GuardAvatar } from "./GuardCard";
+import { GuardFormModal } from "./GuardFormModal";
 import { GlassCard } from "@/components/ui/GlassCard";
+import { Modal } from "@/components/ui/Modal";
+import {
+  CancelButton,
+  Field,
+  SelectInput,
+  TextInput,
+} from "@/components/ui/form";
 import { useToast } from "@/components/ui/Toast";
+import { ALERT_ACCENT, computeAlertStatus, daysRemaining } from "@/lib/compliance";
+import { getGuardPhotoSignedUrlMap } from "@/lib/guard-photo-storage";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import type { Client, Guard, OrgNode } from "@/types/database";
 
-type TreeNode = OrgNode & { children: TreeNode[] };
-
-// Default chain auto-created the first time a pooled client has no nodes.
 const DEFAULT_CHAIN: Array<{ label: string; level: number }> = [
   { label: "Detachment Commander", level: 0 },
   { label: "Shift In-Charge", level: 1 },
@@ -30,75 +45,110 @@ const DEFAULT_CHAIN: Array<{ label: string; level: number }> = [
   { label: "Guard", level: 3 },
 ];
 
-// Droppable id discriminators:
-//   "node:<id>"        the node card itself — dropping a node here = re-parent
-//                      under that node; dropping a guard here = assign to it.
-//   "unassigned"       the unassigned-guards strip — dropping a guard here
-//                      clears its org_node_id.
-// Draggable id discriminators:
-//   "node:<id>"        a node card
-//   "guard:<id>"       a guard chip
 const NODE_PREFIX = "node:";
 const GUARD_PREFIX = "guard:";
 const UNASSIGNED_ID = "unassigned";
+const ROOT_PARENT = "__root__";
+
+// Fixed tile box → uniform layout + exact connector anchor points (no DOM
+// measurement needed). Content is arranged to fit this height.
+const TILE_W = 230;
+const TILE_H = 150;
+const H_GAP = 28;
+const ROW_H = TILE_H + 56;
+const PAD = 24;
+const CANVAS_MIN_HEIGHT = 560;
+
+type XY = { x: number; y: number };
 
 function sortSiblings(a: OrgNode, b: OrgNode): number {
   return a.sort_order - b.sort_order || a.label.localeCompare(b.label);
 }
 
-function buildTree(nodes: OrgNode[]): TreeNode[] {
-  const byId = new Map<string, TreeNode>();
-  nodes.forEach((n) => byId.set(n.id, { ...n, children: [] }));
-  const roots: TreeNode[] = [];
+// Tidy top-down tree layout. Leaves take sequential x slots; parents center
+// over their children. Runs over ALL nodes (positioned ones still get an auto
+// slot, used as the fallback when their pos is later cleared). Multiple roots
+// fan out left-to-right.
+function computeAutoPositions(nodes: OrgNode[]): Map<string, XY> {
+  const ids = new Set(nodes.map((n) => n.id));
+  const byParent = new Map<string | null, OrgNode[]>();
   for (const n of nodes) {
-    const tn = byId.get(n.id)!;
-    if (n.parent_node_id && byId.has(n.parent_node_id)) {
-      byId.get(n.parent_node_id)!.children.push(tn);
-    } else {
-      roots.push(tn);
-    }
+    const p =
+      n.parent_node_id && ids.has(n.parent_node_id) ? n.parent_node_id : null;
+    const arr = byParent.get(p) ?? [];
+    arr.push(n);
+    byParent.set(p, arr);
   }
-  const sortRec = (arr: TreeNode[]) => {
-    arr.sort(sortSiblings);
-    arr.forEach((c) => sortRec(c.children));
-  };
-  sortRec(roots);
-  return roots;
+  for (const arr of byParent.values()) arr.sort(sortSiblings);
+
+  const pos = new Map<string, XY>();
+  let cursor = 0;
+  function place(node: OrgNode, depth: number): number {
+    const kids = byParent.get(node.id) ?? [];
+    let cx: number;
+    if (kids.length === 0) {
+      cx = cursor * (TILE_W + H_GAP);
+      cursor += 1;
+    } else {
+      const xs = kids.map((k) => place(k, depth + 1));
+      cx = (xs[0] + xs[xs.length - 1]) / 2;
+    }
+    pos.set(node.id, { x: cx + PAD, y: depth * ROW_H + PAD });
+    return cx;
+  }
+  for (const root of byParent.get(null) ?? []) place(root, 0);
+  return pos;
 }
 
-type Modal =
-  | { mode: "add-child"; parent: OrgNode }
-  | { mode: "rename"; node: OrgNode }
-  | null;
-
 export function OrgChartCanvas({
-  client,
+  detachmentId,
+  clientId,
+  clients,
   initialNodes,
   initialGuards,
+  photoUrlByGuardId,
 }: {
-  client: Client;
+  detachmentId: string;
+  clientId: string;
+  clients: Client[];
   initialNodes: OrgNode[];
   initialGuards: Guard[];
+  photoUrlByGuardId: Record<string, string>;
 }) {
   const [nodes, setNodes] = useState<OrgNode[]>(initialNodes);
   const [guards, setGuards] = useState<Guard[]>(initialGuards);
+  const [photoUrls, setPhotoUrls] =
+    useState<Record<string, string>>(photoUrlByGuardId);
   const [seeding, setSeeding] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [modal, setModal] = useState<Modal>(null);
+  const [editNode, setEditNode] = useState<OrgNode | null>(null);
+  const [guardModal, setGuardModal] = useState<{
+    node: OrgNode;
+    guard: Guard | null;
+  } | null>(null);
   const [activeDrag, setActiveDrag] = useState<{
     kind: "node" | "guard";
     label: string;
   } | null>(null);
   const didSeed = useRef(false);
+  // A node/guard drag fires a trailing click on mouseup — suppress it so a
+  // reposition drag doesn't also open the editor. Pure clicks (no drag) never
+  // set this, so they open the modal normally.
+  const suppressClick = useRef(false);
   const { showToast } = useToast();
 
-  // 6px activation distance keeps clicks (action buttons, etc.) from
-  // accidentally registering as drags.
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
 
-  const tree = useMemo(() => buildTree(nodes), [nodes]);
+  const autoPositions = useMemo(() => computeAutoPositions(nodes), [nodes]);
+
+  function renderPos(node: OrgNode): XY {
+    if (node.pos_x !== null && node.pos_y !== null) {
+      return { x: node.pos_x, y: node.pos_y };
+    }
+    return autoPositions.get(node.id) ?? { x: PAD, y: PAD };
+  }
 
   const guardsByNode = useMemo(() => {
     const m = new Map<string, Guard[]>();
@@ -116,7 +166,42 @@ export function OrgChartCanvas({
     [guards],
   );
 
-  // Auto-seed default chain on first load of a pooled client with no nodes.
+  // Connector segments (parent bottom-center → child top-center), routed via
+  // an orthogonal elbow. Works regardless of whether either endpoint is auto
+  // or manually positioned.
+  const connectors = useMemo(() => {
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const segs: Array<{ id: string; from: XY; to: XY }> = [];
+    for (const n of nodes) {
+      const pid = n.parent_node_id;
+      if (!pid || !byId.has(pid)) continue;
+      const p = renderPos(byId.get(pid)!);
+      const c = renderPos(n);
+      segs.push({
+        id: n.id,
+        from: { x: p.x + TILE_W / 2, y: p.y + TILE_H },
+        to: { x: c.x + TILE_W / 2, y: c.y },
+      });
+    }
+    return segs;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes, autoPositions]);
+
+  const bounds = useMemo(() => {
+    let maxX = 0;
+    let maxY = 0;
+    for (const n of nodes) {
+      const p = renderPos(n);
+      maxX = Math.max(maxX, p.x + TILE_W);
+      maxY = Math.max(maxY, p.y + TILE_H);
+    }
+    return {
+      w: maxX + PAD,
+      h: Math.max(maxY + PAD, CANVAS_MIN_HEIGHT),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes, autoPositions]);
+
   useEffect(() => {
     if (nodes.length > 0 || didSeed.current) return;
     didSeed.current = true;
@@ -130,16 +215,27 @@ export function OrgChartCanvas({
       supabase
         .from("org_nodes")
         .select("*")
-        .eq("client_id", client.id)
+        .eq("detachment_id", detachmentId)
         .order("sort_order", { ascending: true }),
       supabase
         .from("guards")
         .select("*")
-        .eq("client_id", client.id)
+        .eq("detachment_id", detachmentId)
         .order("full_name", { ascending: true }),
     ]);
-    setNodes((nodesRes.data ?? []) as OrgNode[]);
-    setGuards((guardsRes.data ?? []) as Guard[]);
+    const nextNodes = (nodesRes.data ?? []) as OrgNode[];
+    const nextGuards = (guardsRes.data ?? []) as Guard[];
+    setNodes(nextNodes);
+    setGuards(nextGuards);
+    const byPath = await getGuardPhotoSignedUrlMap(
+      supabase,
+      nextGuards.map((g) => g.photo_url),
+    );
+    const byId: Record<string, string> = {};
+    for (const g of nextGuards) {
+      if (g.photo_url && byPath[g.photo_url]) byId[g.id] = byPath[g.photo_url];
+    }
+    setPhotoUrls(byId);
   }
 
   async function seedDefaultChain() {
@@ -150,11 +246,15 @@ export function OrgChartCanvas({
       const { data, error } = await supabase
         .from("org_nodes")
         .insert({
-          client_id: client.id,
+          detachment_id: detachmentId,
+          client_id: null,
           parent_node_id: parentId,
           label: step.label,
           level: step.level,
           sort_order: 0,
+          is_detached: false,
+          pos_x: null,
+          pos_y: null,
         })
         .select("id")
         .single();
@@ -187,27 +287,43 @@ export function OrgChartCanvas({
     return out;
   }
 
-  async function handleAddChild(parent: OrgNode, label: string) {
+  async function insertNode(label: string, parent: OrgNode | null) {
     setBusy(true);
     const supabase = createSupabaseClient();
+    const parentId = parent?.id ?? null;
+    const level = parent ? parent.level + 1 : 0;
     const siblings = nodes.filter(
-      (n) => (n.parent_node_id ?? null) === parent.id,
+      (n) => (n.parent_node_id ?? null) === parentId,
     );
     const { error } = await supabase.from("org_nodes").insert({
-      client_id: client.id,
-      parent_node_id: parent.id,
+      detachment_id: detachmentId,
+      client_id: null,
+      parent_node_id: parentId,
       label,
-      level: parent.level + 1,
+      level,
       sort_order: siblings.length,
+      is_detached: false,
+      pos_x: null,
+      pos_y: null,
     });
     setBusy(false);
     if (error) {
       showToast(error.message, "error");
       return;
     }
-    setModal(null);
     showToast("Position added", "success");
     await refetch();
+  }
+
+  async function handleAddChild(parent: OrgNode, label: string) {
+    await insertNode(label, parent);
+  }
+
+  async function handleAddSibling(node: OrgNode, label: string) {
+    const parent = node.parent_node_id
+      ? nodes.find((n) => n.id === node.parent_node_id) ?? null
+      : null;
+    await insertNode(label, parent);
   }
 
   async function handleRename(node: OrgNode, label: string) {
@@ -222,7 +338,7 @@ export function OrgChartCanvas({
       showToast(error.message, "error");
       return;
     }
-    setModal(null);
+    setEditNode(null);
     showToast("Position renamed", "success");
     await refetch();
   }
@@ -233,10 +349,9 @@ export function OrgChartCanvas({
     const ok = window.confirm(
       childCount > 0
         ? `Delete "${node.label}" and its ${childCount} sub-position${childCount === 1 ? "" : "s"}? Guards assigned anywhere in this branch will be unassigned (not deleted).`
-        : `Delete "${node.label}"? Any guards assigned here will be unassigned (not deleted).`,
+        : `Delete "${node.label}"? Any guard assigned here will be unassigned (not deleted).`,
     );
     if (!ok) return;
-
     setBusy(true);
     const supabase = createSupabaseClient();
     const { error: unassignErr } = await supabase
@@ -248,20 +363,150 @@ export function OrgChartCanvas({
       showToast(unassignErr.message, "error");
       return;
     }
+    const { error } = await supabase.from("org_nodes").delete().eq("id", node.id);
+    setBusy(false);
+    if (error) {
+      showToast(error.message, "error");
+      return;
+    }
+    setEditNode(null);
+    showToast("Position deleted", "success");
+    await refetch();
+  }
+
+  // Reposition any tile freely (sets pos_x/pos_y). Optimistic local update so
+  // the tile doesn't snap back before the refetch settles.
+  async function handleReposition(node: OrgNode, x: number, y: number) {
+    setNodes((prev) =>
+      prev.map((n) => (n.id === node.id ? { ...n, pos_x: x, pos_y: y } : n)),
+    );
+    const supabase = createSupabaseClient();
     const { error } = await supabase
       .from("org_nodes")
-      .delete()
+      .update({ pos_x: x, pos_y: y })
+      .eq("id", node.id);
+    if (error) {
+      showToast(error.message, "error");
+      await refetch();
+    }
+  }
+
+  // Clear manual position → rejoin the auto tree layout.
+  async function handleResetLayout(node: OrgNode) {
+    setBusy(true);
+    const supabase = createSupabaseClient();
+    const { error } = await supabase
+      .from("org_nodes")
+      .update({ pos_x: null, pos_y: null })
       .eq("id", node.id);
     setBusy(false);
     if (error) {
       showToast(error.message, "error");
       return;
     }
-    showToast("Position deleted", "success");
+    setEditNode(null);
+    showToast("Reset to auto layout", "success");
     await refetch();
   }
 
-  // ---- DnD handlers --------------------------------------------------------
+  async function handleUnassignGuard(guard: Guard) {
+    setBusy(true);
+    const supabase = createSupabaseClient();
+    const { error } = await supabase
+      .from("guards")
+      .update({ org_node_id: null })
+      .eq("id", guard.id);
+    setBusy(false);
+    if (error) {
+      showToast(error.message, "error");
+      return;
+    }
+    setEditNode(null);
+    showToast("Guard unassigned", "success");
+    await refetch();
+  }
+
+  // Relationship-only re-parent (targetId null → make root). Used by the
+  // editor's "Change parent" / "Detach". Positioning is independent (pos_*).
+  async function handleChangeParent(nodeId: string, targetId: string | null) {
+    if (nodeId === targetId) return;
+    if (targetId && descendantIds(nodeId).includes(targetId)) {
+      showToast("A node can't be moved under its own descendant.", "error");
+      return;
+    }
+    const node = nodes.find((n) => n.id === nodeId);
+    if (!node) return;
+    const target = targetId ? nodes.find((n) => n.id === targetId) : null;
+    if (targetId && !target) return;
+    if ((node.parent_node_id ?? null) === (targetId ?? null)) {
+      setEditNode(null);
+      return;
+    }
+
+    setBusy(true);
+    const supabase = createSupabaseClient();
+    const newParentId = targetId ?? null;
+    const siblings = nodes.filter(
+      (n) => (n.parent_node_id ?? null) === newParentId,
+    ).length;
+    const newLevel = target ? target.level + 1 : 0;
+    const levelShift = newLevel - node.level;
+
+    const { error } = await supabase
+      .from("org_nodes")
+      .update({
+        parent_node_id: newParentId,
+        level: newLevel,
+        sort_order: siblings,
+      })
+      .eq("id", nodeId);
+    if (error) {
+      setBusy(false);
+      showToast(error.message, "error");
+      return;
+    }
+    if (levelShift !== 0) {
+      const descIds = descendantIds(nodeId).filter((d) => d !== nodeId);
+      await Promise.all(
+        descIds.map((d) => {
+          const dn = nodes.find((n) => n.id === d);
+          if (!dn) return Promise.resolve({ error: null });
+          return supabase
+            .from("org_nodes")
+            .update({ level: dn.level + levelShift })
+            .eq("id", d);
+        }),
+      );
+    }
+    setBusy(false);
+    setEditNode(null);
+    showToast(
+      target ? `Moved under "${target.label}"` : `"${node.label}" is now a root`,
+      "success",
+    );
+    await refetch();
+  }
+
+  async function handleGuardAssign(guardId: string, newNodeId: string | null) {
+    const guard = guards.find((g) => g.id === guardId);
+    if (!guard) return;
+    if ((guard.org_node_id ?? null) === newNodeId) return;
+    setBusy(true);
+    const supabase = createSupabaseClient();
+    const { error } = await supabase
+      .from("guards")
+      .update({ org_node_id: newNodeId })
+      .eq("id", guardId);
+    setBusy(false);
+    if (error) {
+      showToast(error.message, "error");
+      return;
+    }
+    showToast(newNodeId === null ? "Guard unassigned" : "Guard assigned", "success");
+    await refetch();
+  }
+
+  // ---- DnD ----------------------------------------------------------------
 
   function onDragStart(event: DragStartEvent) {
     const id = String(event.active.id);
@@ -276,120 +521,61 @@ export function OrgChartCanvas({
 
   async function onDragEnd(event: DragEndEvent) {
     setActiveDrag(null);
-    const { active, over } = event;
-    if (!over) return;
+    const { active, over, delta } = event;
     const activeId = String(active.id);
-    const overId = String(over.id);
-    if (activeId === overId) return;
+
+    // Any real drag suppresses the trailing click.
+    if (delta.x !== 0 || delta.y !== 0) {
+      suppressClick.current = true;
+      window.setTimeout(() => {
+        suppressClick.current = false;
+      }, 0);
+    }
 
     if (activeId.startsWith(NODE_PREFIX)) {
-      const nodeId = activeId.slice(NODE_PREFIX.length);
-      if (!overId.startsWith(NODE_PREFIX)) return;
-      const targetId = overId.slice(NODE_PREFIX.length);
-      await handleReparent(nodeId, targetId);
+      // Node drag = free reposition (relationships unchanged).
+      const node = nodes.find((n) => n.id === activeId.slice(NODE_PREFIX.length));
+      if (!node) return;
+      if (delta.x === 0 && delta.y === 0) return;
+      const base = renderPos(node);
+      await handleReposition(
+        node,
+        Math.max(0, base.x + delta.x),
+        Math.max(0, base.y + delta.y),
+      );
       return;
     }
 
     if (activeId.startsWith(GUARD_PREFIX)) {
+      if (!over) return;
+      const overId = String(over.id);
       const guardId = activeId.slice(GUARD_PREFIX.length);
       let newNodeId: string | null = null;
-      if (overId === UNASSIGNED_ID) {
-        newNodeId = null;
-      } else if (overId.startsWith(NODE_PREFIX)) {
+      if (overId === UNASSIGNED_ID) newNodeId = null;
+      else if (overId.startsWith(NODE_PREFIX))
         newNodeId = overId.slice(NODE_PREFIX.length);
-      } else {
-        return;
-      }
+      else return;
       await handleGuardAssign(guardId, newNodeId);
     }
   }
 
-  async function handleReparent(nodeId: string, targetId: string) {
-    if (nodeId === targetId) return;
-    // Cycle guard: targetId must NOT be a descendant of nodeId, else we'd
-    // be making a node its own ancestor.
-    if (descendantIds(nodeId).includes(targetId)) {
-      showToast("A node can't be moved under its own descendant.", "error");
-      return;
-    }
-    const node = nodes.find((n) => n.id === nodeId);
-    const target = nodes.find((n) => n.id === targetId);
-    if (!node || !target) return;
-    if (node.parent_node_id === targetId) return; // no-op
-
-    setBusy(true);
-    const supabase = createSupabaseClient();
-    const newSiblingsCount = nodes.filter(
-      (n) => (n.parent_node_id ?? null) === targetId,
-    ).length;
-    const newLevel = target.level + 1;
-    const levelShift = newLevel - node.level;
-
-    // Update the moved node itself.
-    const { error } = await supabase
-      .from("org_nodes")
-      .update({
-        parent_node_id: targetId,
-        level: newLevel,
-        sort_order: newSiblingsCount,
-      })
-      .eq("id", nodeId);
-    if (error) {
-      setBusy(false);
-      showToast(error.message, "error");
-      return;
-    }
-
-    // Shift all descendants' levels by the same delta so the subtree stays
-    // internally consistent.
-    if (levelShift !== 0) {
-      const descIds = descendantIds(nodeId).filter((id) => id !== nodeId);
-      if (descIds.length > 0) {
-        await Promise.all(
-          descIds.map((id) => {
-            const d = nodes.find((n) => n.id === id);
-            if (!d) return Promise.resolve({ error: null });
-            return supabase
-              .from("org_nodes")
-              .update({ level: d.level + levelShift })
-              .eq("id", id);
-          }),
-        );
-      }
-    }
-
-    setBusy(false);
-    showToast(`Moved "${node.label}" under "${target.label}"`, "success");
-    await refetch();
+  function openEditor(node: OrgNode) {
+    if (suppressClick.current) return;
+    setEditNode(node);
   }
 
-  async function handleGuardAssign(guardId: string, newNodeId: string | null) {
-    const guard = guards.find((g) => g.id === guardId);
-    if (!guard) return;
-    if ((guard.org_node_id ?? null) === newNodeId) return; // no-op
-    setBusy(true);
-    const supabase = createSupabaseClient();
-    const { error } = await supabase
-      .from("guards")
-      .update({ org_node_id: newNodeId })
-      .eq("id", guardId);
-    setBusy(false);
-    if (error) {
-      showToast(error.message, "error");
-      return;
-    }
-    showToast(
-      newNodeId === null ? "Guard unassigned" : "Guard reassigned",
-      "success",
-    );
-    await refetch();
-  }
+  // ---- Render -------------------------------------------------------------
 
-  // ---- Render --------------------------------------------------------------
+  const editNodeGuard = editNode
+    ? guardsByNode.get(editNode.id)?.[0] ?? null
+    : null;
+  const parentCandidates = editNode
+    ? nodes.filter(
+        (n) =>
+          n.id !== editNode.id && !descendantIds(editNode.id).includes(n.id),
+      )
+    : [];
 
-  // The chart is now embedded directly in the client detail page (no
-  // breadcrumb, no h1, no back link) — those live in the parent. We render
-  // a small inline hint + the DnD canvas.
   return (
     <div>
       <p
@@ -400,21 +586,22 @@ export function OrgChartCanvas({
           color: "rgba(245, 245, 247, 0.55)",
         }}
       >
-        Drag a node onto another to re-parent. Drag a guard chip onto a node
-        to assign, or onto the Unassigned strip to unassign.
+        Click a tile to edit the position or its guard. Drag a tile to place it
+        anywhere — connector lines follow. Use the tile editor’s “Change parent”
+        to re-wire the hierarchy, or “Reset to auto layout” to snap it back.
+        Drag a guard from the Unassigned strip onto a tile to assign.
       </p>
       <DndContext
         sensors={sensors}
         collisionDetection={pointerWithin}
-        modifiers={[restrictToWindowEdges]}
         onDragStart={onDragStart}
         onDragEnd={onDragEnd}
       >
-        <UnassignedStrip guards={unassignedGuards} />
+        <UnassignedStrip guards={unassignedGuards} photoUrls={photoUrls} />
 
         <div style={{ height: 16 }} />
 
-        <GlassCard style={{ overflow: "hidden" }}>
+        <GlassCard style={{ overflow: "hidden", padding: 0 }}>
           {seeding ? (
             <div
               style={{
@@ -427,27 +614,59 @@ export function OrgChartCanvas({
               Setting up the default structure…
             </div>
           ) : nodes.length === 0 ? (
-            <EmptyState onSeed={() => {
-              didSeed.current = true;
-              void seedDefaultChain();
-            }} disabled={busy} />
+            <EmptyState
+              onSeed={() => {
+                didSeed.current = true;
+                void seedDefaultChain();
+              }}
+              disabled={busy}
+            />
           ) : (
-            <div className="org-tree">
-              <ul>
-                {tree.map((root) => (
-                  <TreeBranch
-                    key={root.id}
-                    node={root}
-                    guardsByNode={guardsByNode}
-                    busy={busy}
-                    onAddChild={(parent) =>
-                      setModal({ mode: "add-child", parent })
-                    }
-                    onRename={(n) => setModal({ mode: "rename", node: n })}
-                    onDelete={handleDelete}
+            <div style={{ overflow: "auto", maxHeight: "75vh" }}>
+              <div
+                style={{
+                  position: "relative",
+                  width: bounds.w,
+                  height: bounds.h,
+                }}
+              >
+                <svg
+                  width={bounds.w}
+                  height={bounds.h}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    pointerEvents: "none",
+                    zIndex: 0,
+                  }}
+                  aria-hidden
+                >
+                  {connectors.map((seg) => {
+                    const midY = seg.from.y + (seg.to.y - seg.from.y) / 2;
+                    return (
+                      <path
+                        key={seg.id}
+                        d={`M ${seg.from.x} ${seg.from.y} L ${seg.from.x} ${midY} L ${seg.to.x} ${midY} L ${seg.to.x} ${seg.to.y}`}
+                        fill="none"
+                        stroke="rgba(255, 255, 255, 0.18)"
+                        strokeWidth={1.5}
+                      />
+                    );
+                  })}
+                </svg>
+
+                {nodes.map((n) => (
+                  <NodeTile
+                    key={n.id}
+                    node={n}
+                    pos={renderPos(n)}
+                    guards={guardsByNode.get(n.id) ?? []}
+                    photoUrls={photoUrls}
+                    onOpen={() => openEditor(n)}
                   />
                 ))}
-              </ul>
+              </div>
             </div>
           )}
         </GlassCard>
@@ -457,24 +676,50 @@ export function OrgChartCanvas({
         </DragOverlay>
       </DndContext>
 
-      {modal?.mode === "add-child" ? (
-        <NodeFormModal
-          title={`Add position under "${modal.parent.label}"`}
-          initialLabel=""
-          submitLabel="Add position"
-          saving={busy}
-          onSubmit={(label) => handleAddChild(modal.parent, label)}
-          onClose={() => setModal(null)}
+      {editNode ? (
+        <NodeEditModal
+          node={editNode}
+          hasPos={editNode.pos_x !== null && editNode.pos_y !== null}
+          parentCandidates={parentCandidates}
+          assignedGuard={editNodeGuard}
+          assignedPhotoUrl={
+            editNodeGuard ? photoUrls[editNodeGuard.id] ?? null : null
+          }
+          busy={busy}
+          onRename={(label) => handleRename(editNode, label)}
+          onAddChild={(label) => handleAddChild(editNode, label)}
+          onAddSibling={(label) => handleAddSibling(editNode, label)}
+          onChangeParent={(pid) => handleChangeParent(editNode.id, pid)}
+          onResetLayout={() => handleResetLayout(editNode)}
+          onDelete={() => handleDelete(editNode)}
+          onEditGuard={(g) => {
+            const node = editNode;
+            setEditNode(null);
+            setGuardModal({ node, guard: g });
+          }}
+          onAssignGuard={() => {
+            const node = editNode;
+            setEditNode(null);
+            setGuardModal({ node, guard: null });
+          }}
+          onUnassignGuard={(g) => handleUnassignGuard(g)}
+          onClose={() => setEditNode(null)}
         />
       ) : null}
-      {modal?.mode === "rename" ? (
-        <NodeFormModal
-          title="Rename position"
-          initialLabel={modal.node.label}
-          submitLabel="Save"
-          saving={busy}
-          onSubmit={(label) => handleRename(modal.node, label)}
-          onClose={() => setModal(null)}
+
+      {guardModal ? (
+        <GuardFormModal
+          clientId={clientId}
+          detachmentId={detachmentId}
+          orgNodeId={guardModal.node.id}
+          lockAssignment={guardModal.guard === null}
+          initialGuard={guardModal.guard}
+          clients={clients}
+          onClose={() => setGuardModal(null)}
+          onSaved={() => {
+            setGuardModal(null);
+            refetch();
+          }}
         />
       ) : null}
     </div>
@@ -507,7 +752,7 @@ function EmptyState({
           maxWidth: 360,
         }}
       >
-        No org chart yet for this client.
+        No org chart yet for this detachment.
       </p>
       <button
         type="button"
@@ -561,9 +806,13 @@ function DragPreview({
   );
 }
 
-// ---- Unassigned strip ------------------------------------------------------
-
-function UnassignedStrip({ guards }: { guards: Guard[] }) {
+function UnassignedStrip({
+  guards,
+  photoUrls,
+}: {
+  guards: Guard[];
+  photoUrls: Record<string, string>;
+}) {
   const { setNodeRef, isOver } = useDroppable({ id: UNASSIGNED_ID });
   return (
     <GlassCard
@@ -582,7 +831,7 @@ function UnassignedStrip({ guards }: { guards: Guard[] }) {
           alignItems: "center",
           gap: 10,
           flexWrap: "wrap",
-          minHeight: 36,
+          minHeight: 44,
           padding: 4,
         }}
       >
@@ -600,240 +849,230 @@ function UnassignedStrip({ guards }: { guards: Guard[] }) {
           Unassigned ({guards.length})
         </span>
         {guards.length === 0 ? (
-          <span
-            style={{
-              fontSize: 12,
-              color: "rgba(245, 245, 247, 0.4)",
-            }}
-          >
+          <span style={{ fontSize: 12, color: "rgba(245, 245, 247, 0.4)" }}>
             {isOver ? "Drop here to unassign" : "All guards are assigned."}
           </span>
         ) : (
-          guards.map((g) => <GuardChip key={g.id} guard={g} />)
+          guards.map((g) => (
+            <GuardChip key={g.id} guard={g} photoUrl={photoUrls[g.id] ?? null} />
+          ))
         )}
       </div>
     </GlassCard>
   );
 }
 
-// ---- Tree branch + Node card ----------------------------------------------
-
-function TreeBranch({
+function NodeTile({
   node,
-  guardsByNode,
-  busy,
-  onAddChild,
-  onRename,
-  onDelete,
-}: {
-  node: TreeNode;
-  guardsByNode: Map<string, Guard[]>;
-  busy: boolean;
-  onAddChild: (parent: OrgNode) => void;
-  onRename: (node: OrgNode) => void;
-  onDelete: (node: OrgNode) => void;
-}) {
-  return (
-    <li>
-      <NodeCard
-        node={node}
-        guards={guardsByNode.get(node.id) ?? []}
-        busy={busy}
-        onAddChild={() => onAddChild(node)}
-        onRename={() => onRename(node)}
-        onDelete={() => onDelete(node)}
-      />
-      {node.children.length > 0 ? (
-        <ul>
-          {node.children.map((child) => (
-            <TreeBranch
-              key={child.id}
-              node={child}
-              guardsByNode={guardsByNode}
-              busy={busy}
-              onAddChild={onAddChild}
-              onRename={onRename}
-              onDelete={onDelete}
-            />
-          ))}
-        </ul>
-      ) : null}
-    </li>
-  );
-}
-
-function NodeCard({
-  node,
+  pos,
   guards,
-  busy,
-  onAddChild,
-  onRename,
-  onDelete,
+  photoUrls,
+  onOpen,
 }: {
   node: OrgNode;
+  pos: XY;
   guards: Guard[];
-  busy: boolean;
-  onAddChild: () => void;
-  onRename: () => void;
-  onDelete: () => void;
+  photoUrls: Record<string, string>;
+  onOpen: () => void;
 }) {
-  // Drag source: the node card. Drop target: ALSO the node card (drop a
-  // node here to re-parent under it; drop a guard here to assign).
   const draggable = useDraggable({ id: `${NODE_PREFIX}${node.id}` });
   const droppable = useDroppable({ id: `${NODE_PREFIX}${node.id}` });
 
-  // Combined ref for both hooks on the same element.
   function setRef(el: HTMLDivElement | null) {
     draggable.setNodeRef(el);
     droppable.setNodeRef(el);
   }
 
+  const t = draggable.transform;
+  const guard = guards[0] ?? null;
+  const extra = guards.length - 1;
+  const positioned = node.pos_x !== null && node.pos_y !== null;
+
   const borderColor = droppable.isOver
     ? "rgba(201, 169, 97, 0.8)"
-    : "rgba(255, 255, 255, 0.10)";
+    : positioned
+      ? "rgba(201, 169, 97, 0.35)"
+      : "rgba(255, 255, 255, 0.10)";
 
   return (
     <div
       ref={setRef}
+      {...draggable.attributes}
+      {...draggable.listeners}
+      onClick={onOpen}
+      title="Click to edit · drag to reposition"
       style={{
-        display: "inline-block",
-        width: 220,
-        textAlign: "left",
-        verticalAlign: "top",
-        backgroundColor: "rgba(255, 255, 255, 0.04)",
+        position: "absolute",
+        left: pos.x,
+        top: pos.y,
+        width: TILE_W,
+        height: TILE_H,
+        transform: t ? `translate3d(${t.x}px, ${t.y}px, 0)` : undefined,
+        zIndex: draggable.isDragging ? 40 : 1,
+        boxSizing: "border-box",
+        backgroundColor: positioned
+          ? "rgba(20, 18, 12, 0.96)"
+          : "rgba(255, 255, 255, 0.04)",
         border: `1px solid ${borderColor}`,
         borderTop: "2px solid #c9a961",
         borderRadius: 10,
-        boxShadow: droppable.isOver
-          ? "0 0 0 3px rgba(201, 169, 97, 0.18)"
-          : "0 6px 20px rgba(0, 0, 0, 0.3)",
+        boxShadow: draggable.isDragging
+          ? "0 16px 40px rgba(0, 0, 0, 0.6)"
+          : droppable.isOver
+            ? "0 0 0 3px rgba(201, 169, 97, 0.18)"
+            : "0 6px 20px rgba(0, 0, 0, 0.3)",
         padding: 12,
-        opacity: draggable.isDragging ? 0.4 : 1,
-        cursor: draggable.isDragging ? "grabbing" : "default",
-        transition:
-          "border-color 150ms ease-out, box-shadow 150ms ease-out, opacity 150ms ease-out",
+        cursor: draggable.isDragging ? "grabbing" : "grab",
+        opacity: draggable.isDragging ? 0.85 : 1,
+        touchAction: "none",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        transition: draggable.isDragging
+          ? "none"
+          : "border-color 150ms ease-out, box-shadow 150ms ease-out",
       }}
     >
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-        <DragHandle
-          attributes={draggable.attributes}
-          listeners={draggable.listeners}
-        />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div
-            style={{
-              fontSize: 13.5,
-              fontWeight: 600,
-              color: "#f5f5f7",
-              letterSpacing: "-0.01em",
-              wordBreak: "break-word",
-            }}
-          >
-            {node.label}
-          </div>
-          <div
-            style={{
-              marginTop: 2,
-              fontSize: 10,
-              fontWeight: 500,
-              letterSpacing: "0.06em",
-              textTransform: "uppercase",
-              color: "rgba(245, 245, 247, 0.4)",
-            }}
-          >
-            Level {node.level}
-          </div>
-        </div>
-      </div>
-
-      {/* Assigned guards */}
       <div
         style={{
-          marginTop: 10,
-          minHeight: 28,
           display: "flex",
-          flexWrap: "wrap",
-          gap: 5,
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 6,
         }}
       >
-        {guards.length === 0 ? (
+        <div
+          style={{
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: "0.06em",
+            textTransform: "uppercase",
+            color: "rgba(245, 245, 247, 0.45)",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {node.label}
+        </div>
+        {positioned ? (
           <span
+            title="Manually positioned"
             style={{
-              fontSize: 11,
+              fontSize: 9,
+              fontWeight: 600,
+              color: "#c9a961",
+              flexShrink: 0,
+            }}
+          >
+            ●
+          </span>
+        ) : null}
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, marginTop: 10 }}>
+        {guard ? (
+          <AssignedGuard guard={guard} photoUrl={photoUrls[guard.id] ?? null} />
+        ) : (
+          <div
+            style={{
+              height: "100%",
+              display: "flex",
+              alignItems: "center",
+              fontSize: 11.5,
               color: "rgba(245, 245, 247, 0.35)",
             }}
           >
-            Drop guards here
-          </span>
-        ) : (
-          guards.map((g) => <GuardChip key={g.id} guard={g} />)
+            Drop a guard here, or click to assign
+          </div>
         )}
       </div>
 
-      {/* Actions */}
-      <div
-        style={{
-          marginTop: 10,
-          paddingTop: 8,
-          borderTop: "1px solid rgba(255, 255, 255, 0.06)",
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 10,
-        }}
-      >
-        <ActionButton label="Add child" onClick={onAddChild} disabled={busy} />
-        <ActionButton label="Rename" onClick={onRename} disabled={busy} />
-        <ActionButton label="Delete" onClick={onDelete} disabled={busy} danger />
+      {extra > 0 ? (
+        <div style={{ fontSize: 11, color: "rgba(245, 158, 11, 0.85)" }}>
+          +{extra} more on this position
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AssignedGuard({
+  guard,
+  photoUrl,
+}: {
+  guard: Guard;
+  photoUrl: string | null;
+}) {
+  const days = daysRemaining(guard.license_expiry);
+  const status = computeAlertStatus(guard.license_expiry);
+  const showExpiry =
+    guard.license_expiry !== null && days !== null && days <= 30;
+  return (
+    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+      <GuardAvatar name={guard.full_name} photoUrl={photoUrl} size={44} />
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: "#f5f5f7",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {guard.full_name}
+        </div>
+        <div
+          className="tabular"
+          style={{
+            fontSize: 11,
+            color: "rgba(245, 245, 247, 0.55)",
+            marginTop: 2,
+          }}
+        >
+          {guard.license_no ?? "No license"}
+        </div>
+        <div
+          style={{
+            marginTop: 5,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            flexWrap: "wrap",
+          }}
+        >
+          <GuardStatusBadge status={guard.status} />
+          {showExpiry ? (
+            <span
+              style={{
+                fontSize: 10,
+                fontWeight: 600,
+                padding: "2px 6px",
+                borderRadius: 4,
+                color: ALERT_ACCENT[status].fg,
+                backgroundColor: ALERT_ACCENT[status].bg,
+                border: `1px solid ${ALERT_ACCENT[status].border}`,
+              }}
+            >
+              {days! < 0 ? "License expired" : `Expires in ${days}d`}
+            </span>
+          ) : null}
+        </div>
       </div>
     </div>
   );
 }
 
-function DragHandle({
-  attributes,
-  listeners,
+function GuardChip({
+  guard,
+  photoUrl,
 }: {
-  attributes: ReturnType<typeof useDraggable>["attributes"];
-  listeners: ReturnType<typeof useDraggable>["listeners"];
+  guard: Guard;
+  photoUrl: string | null;
 }) {
-  return (
-    <button
-      type="button"
-      {...attributes}
-      {...listeners}
-      aria-label="Drag node"
-      title="Drag to move under a different parent"
-      style={{
-        background: "transparent",
-        border: "none",
-        padding: 0,
-        cursor: "grab",
-        color: "rgba(245, 245, 247, 0.4)",
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexShrink: 0,
-      }}
-    >
-      <svg
-        width="12"
-        height="12"
-        viewBox="0 0 24 24"
-        fill="currentColor"
-        aria-hidden
-      >
-        <circle cx="9" cy="6" r="1.5" />
-        <circle cx="15" cy="6" r="1.5" />
-        <circle cx="9" cy="12" r="1.5" />
-        <circle cx="15" cy="12" r="1.5" />
-        <circle cx="9" cy="18" r="1.5" />
-        <circle cx="15" cy="18" r="1.5" />
-      </svg>
-    </button>
-  );
-}
-
-function GuardChip({ guard }: { guard: Guard }) {
+  const router = useRouter();
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `${GUARD_PREFIX}${guard.id}`,
   });
@@ -842,68 +1081,322 @@ function GuardChip({ guard }: { guard: Guard }) {
       ref={setNodeRef}
       {...attributes}
       {...listeners}
-      title={`Drag to move ${guard.full_name}`}
+      onClick={() => router.push(`/hierarchy/guards/${guard.id}`)}
+      title={`${guard.full_name} — drag to assign, click to open`}
       style={{
         display: "inline-flex",
         alignItems: "center",
-        padding: "4px 9px",
+        gap: 6,
+        padding: "3px 8px 3px 3px",
         backgroundColor: "rgba(255, 255, 255, 0.05)",
         border: "1px solid rgba(255, 255, 255, 0.10)",
-        borderRadius: 6,
+        borderRadius: 999,
         fontSize: 11.5,
         fontWeight: 500,
         color: "#f5f5f7",
-        cursor: isDragging ? "grabbing" : "grab",
+        cursor: isDragging ? "grabbing" : "pointer",
         opacity: isDragging ? 0.4 : 1,
         transition: "opacity 120ms ease-out",
         userSelect: "none",
+        touchAction: "none",
+        maxWidth: 180,
       }}
     >
-      {guard.full_name}
+      <GuardAvatar name={guard.full_name} photoUrl={photoUrl} size={22} ring={false} />
+      <span
+        style={{
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {guard.full_name}
+      </span>
     </div>
   );
 }
 
-function ActionButton({
+// ---- Node edit modal ------------------------------------------------------
+
+function NodeEditModal({
+  node,
+  hasPos,
+  parentCandidates,
+  assignedGuard,
+  assignedPhotoUrl,
+  busy,
+  onRename,
+  onAddChild,
+  onAddSibling,
+  onChangeParent,
+  onResetLayout,
+  onDelete,
+  onEditGuard,
+  onAssignGuard,
+  onUnassignGuard,
+  onClose,
+}: {
+  node: OrgNode;
+  hasPos: boolean;
+  parentCandidates: OrgNode[];
+  assignedGuard: Guard | null;
+  assignedPhotoUrl: string | null;
+  busy: boolean;
+  onRename: (label: string) => void;
+  onAddChild: (label: string) => void;
+  onAddSibling: (label: string) => void;
+  onChangeParent: (parentId: string | null) => void;
+  onResetLayout: () => void;
+  onDelete: () => void;
+  onEditGuard: (g: Guard) => void;
+  onAssignGuard: () => void;
+  onUnassignGuard: (g: Guard) => void;
+  onClose: () => void;
+}) {
+  const [label, setLabel] = useState(node.label);
+  const [newPos, setNewPos] = useState("");
+  const [parentSel, setParentSel] = useState(
+    node.parent_node_id ?? ROOT_PARENT,
+  );
+
+  const parentOptions = [
+    { value: ROOT_PARENT, label: "— Make root (no parent) —" },
+    ...parentCandidates.map((c) => ({
+      value: c.id,
+      label: `${c.label} (level ${c.level})`,
+    })),
+  ];
+
+  return (
+    <Modal title="Edit position" onClose={onClose} maxWidth={560}>
+      <SectionLabel>Position</SectionLabel>
+      <Field label="Role / position name" htmlFor="node-label">
+        <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <TextInput id="node-label" value={label} onChange={setLabel} disabled={busy} />
+          </div>
+          <ChipButton
+            label="Save"
+            onClick={() => label.trim() && onRename(label.trim())}
+            disabled={busy || !label.trim() || label.trim() === node.label}
+          />
+        </div>
+      </Field>
+
+      <Field
+        label="Add a position"
+        htmlFor="node-new-pos"
+        helper="Child = one level down. Sibling = peer under the same parent."
+      >
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 160 }}>
+            <TextInput
+              id="node-new-pos"
+              value={newPos}
+              onChange={setNewPos}
+              placeholder="e.g. Relief Guard"
+              disabled={busy}
+            />
+          </div>
+          <ChipButton
+            label="Add child"
+            onClick={() => {
+              if (!newPos.trim()) return;
+              onAddChild(newPos.trim());
+              setNewPos("");
+            }}
+            disabled={busy || !newPos.trim()}
+          />
+          <ChipButton
+            label="Add sibling"
+            onClick={() => {
+              if (!newPos.trim()) return;
+              onAddSibling(newPos.trim());
+              setNewPos("");
+            }}
+            disabled={busy || !newPos.trim()}
+          />
+        </div>
+      </Field>
+
+      <Field label="Change parent" htmlFor="node-parent">
+        <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <SelectInput
+              id="node-parent"
+              value={parentSel}
+              onChange={setParentSel}
+              options={parentOptions}
+              disabled={busy}
+            />
+          </div>
+          <ChipButton
+            label="Apply"
+            onClick={() =>
+              onChangeParent(parentSel === ROOT_PARENT ? null : parentSel)
+            }
+            disabled={busy}
+          />
+        </div>
+      </Field>
+
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 4 }}>
+        {node.parent_node_id ? (
+          <ChipButton
+            label="Detach (make root)"
+            onClick={() => onChangeParent(null)}
+            disabled={busy}
+          />
+        ) : null}
+        {hasPos ? (
+          <ChipButton
+            label="Reset to auto layout"
+            onClick={onResetLayout}
+            disabled={busy}
+          />
+        ) : null}
+        <ChipButton label="Delete position" onClick={onDelete} disabled={busy} danger />
+      </div>
+
+      <Divider />
+
+      <SectionLabel>Guard</SectionLabel>
+      {assignedGuard ? (
+        <div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              padding: 12,
+              borderRadius: 10,
+              backgroundColor: "rgba(255, 255, 255, 0.03)",
+              border: "1px solid rgba(255, 255, 255, 0.08)",
+            }}
+          >
+            <GuardAvatar
+              name={assignedGuard.full_name}
+              photoUrl={assignedPhotoUrl}
+              size={48}
+            />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "#f5f5f7" }}>
+                {assignedGuard.full_name}
+              </div>
+              <div
+                className="tabular"
+                style={{
+                  fontSize: 12,
+                  color: "rgba(245, 245, 247, 0.55)",
+                  marginTop: 2,
+                }}
+              >
+                {assignedGuard.license_no ?? "No license no."}
+              </div>
+            </div>
+            <GuardStatusBadge status={assignedGuard.status} />
+          </div>
+          <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+            <ChipButton
+              label="Edit guard details"
+              onClick={() => onEditGuard(assignedGuard)}
+              disabled={busy}
+              primary
+            />
+            <ChipButton
+              label="Unassign guard"
+              onClick={() => onUnassignGuard(assignedGuard)}
+              disabled={busy}
+              danger
+            />
+          </div>
+        </div>
+      ) : (
+        <div>
+          <p style={{ margin: "0 0 12px", fontSize: 13, color: "rgba(245, 245, 247, 0.6)" }}>
+            No guard assigned. Add one here, or drag a guard from the Unassigned
+            strip onto the tile.
+          </p>
+          <ChipButton label="Assign guard" onClick={onAssignGuard} disabled={busy} primary />
+        </div>
+      )}
+
+      <div style={{ height: 20 }} />
+      <div style={{ display: "flex", justifyContent: "center" }}>
+        <CancelButton onClick={onClose} disabled={busy}>
+          Close
+        </CancelButton>
+      </div>
+    </Modal>
+  );
+}
+
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <div
+      style={{
+        fontSize: 11,
+        fontWeight: 600,
+        letterSpacing: "0.08em",
+        textTransform: "uppercase",
+        color: "#c9a961",
+        marginBottom: 12,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Divider() {
+  return (
+    <div
+      style={{
+        height: 1,
+        margin: "20px 0",
+        backgroundColor: "rgba(255, 255, 255, 0.08)",
+      }}
+    />
+  );
+}
+
+function ChipButton({
   label,
   onClick,
   disabled,
   danger,
+  primary,
 }: {
   label: string;
   onClick: () => void;
   disabled?: boolean;
   danger?: boolean;
+  primary?: boolean;
 }) {
-  const [hover, setHover] = useState(false);
-  const color = danger
-    ? hover
-      ? "#ef4444"
-      : "rgba(239, 68, 68, 0.7)"
-    : hover
-      ? "#f5f5f7"
-      : "rgba(245, 245, 247, 0.5)";
+  const base: CSSProperties = {
+    borderRadius: 8,
+    padding: "9px 14px",
+    fontSize: 13,
+    fontWeight: 600,
+    fontFamily: "inherit",
+    cursor: disabled ? "not-allowed" : "pointer",
+    opacity: disabled ? 0.5 : 1,
+    whiteSpace: "nowrap",
+  };
+  const variant: CSSProperties = primary
+    ? {
+        background: "linear-gradient(180deg, #D4B670 0%, #C9A961 100%)",
+        color: "#080b12",
+        border: "1px solid rgba(201, 169, 97, 0.4)",
+      }
+    : {
+        background: "rgba(255, 255, 255, 0.04)",
+        color: danger ? "#ef4444" : "rgba(245, 245, 247, 0.8)",
+        border: `1px solid ${danger ? "rgba(239, 68, 68, 0.3)" : "rgba(255, 255, 255, 0.12)"}`,
+      };
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        background: "transparent",
-        border: "none",
-        padding: 0,
-        fontSize: 12,
-        fontWeight: 500,
-        fontFamily: "inherit",
-        cursor: disabled ? "not-allowed" : "pointer",
-        color,
-        transition: "color 150ms ease-out",
-      }}
-    >
+    <button type="button" onClick={onClick} disabled={disabled} style={{ ...base, ...variant }}>
       {label}
     </button>
   );
 }
-

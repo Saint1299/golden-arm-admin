@@ -19,7 +19,7 @@ import {
   type GuardStatus,
 } from "@/types/database";
 
-type BulkMode = "clients" | "guards";
+type BulkMode = "clients" | "guards" | "detachments";
 
 type ClientInsert = {
   name: string;
@@ -28,8 +28,17 @@ type ClientInsert = {
   conglomerate: string | null;
 };
 
+type DetachmentInsert = {
+  client_id: string;
+  name: string;
+  address: string | null;
+  is_single_post: boolean;
+  notes: string | null;
+};
+
 type GuardInsert = {
   client_id: string | null;
+  detachment_id: string | null;
   full_name: string;
   first_name: string;
   middle_name: string | null;
@@ -58,13 +67,16 @@ type ParsedClientRow =
   | { index: number; ok: true; payload: ClientInsert }
   | { index: number; ok: false; reason: string; raw: Record<string, string> };
 
+type ParsedDetachmentRow =
+  | { index: number; ok: true; payload: DetachmentInsert; client_name: string }
+  | { index: number; ok: false; reason: string; raw: Record<string, string> };
+
 type ParsedGuardRow =
   | {
       index: number;
       ok: true;
       payload: GuardInsert;
-      // Display label for the preview: the matched client name, or
-      // "Unassigned" when the row has no client_name.
+      // Display label for the preview: client + detachment, or "Unassigned".
       client_name: string;
     }
   | {
@@ -74,7 +86,10 @@ type ParsedGuardRow =
       raw: Record<string, string>;
     };
 
-type ParsedRow = ParsedClientRow | ParsedGuardRow;
+type ParsedRow = ParsedClientRow | ParsedGuardRow | ParsedDetachmentRow;
+
+// Lightweight detachment shape used for resolving names → ids.
+type DetachmentLite = { id: string; client_id: string; name: string };
 
 // Template content — header row + a single sample row so the file
 // downloads with a worked example the user can crib from.
@@ -86,6 +101,7 @@ const CLIENT_TEMPLATE_CSV =
 // recomputed from the name parts on import (see parseGuardRow).
 const GUARD_CSV_COLUMNS = [
   "client_name",
+  "detachment_name",
   "id_number",
   "full_name",
   "first_name",
@@ -110,7 +126,17 @@ const GUARD_CSV_COLUMNS = [
   "notes",
 ] as const;
 
-const GUARD_TEMPLATE_CSV = `${GUARD_CSV_COLUMNS.join(",")}\nSM Megamall,GA-0142,,Juan,Santos,Dela Cruz,1990-01-15,Quezon City,123 Rizal St Brgy Maligaya,High school graduate,SG,SOSIA-12345,2027-03-01,0917-000-0000,0918-111-2222,2026-01-15,34-1234567-8,12-345678901-2,1234-5678-9012,123-456-789-000,Main lobby,active,Prefers night shift\n`;
+const GUARD_TEMPLATE_CSV = `${GUARD_CSV_COLUMNS.join(",")}\nSM Megamall,Main Lobby,GA-0142,,Juan,Santos,Dela Cruz,1990-01-15,Quezon City,123 Rizal St Brgy Maligaya,High school graduate,SG,SOSIA-12345,2027-03-01,0917-000-0000,0918-111-2222,2026-01-15,34-1234567-8,12-345678901-2,1234-5678-9012,123-456-789-000,Main lobby,active,Prefers night shift\n`;
+
+const DETACHMENT_CSV_COLUMNS = [
+  "client_name",
+  "name",
+  "address",
+  "is_single_post",
+  "notes",
+] as const;
+
+const DETACHMENT_TEMPLATE_CSV = `${DETACHMENT_CSV_COLUMNS.join(",")}\nSM Megamall,Main Lobby,Ground floor main entrance,FALSE,Two shifts\nSM Megamall,Loading Dock,Rear service area,TRUE,Single post\n`;
 
 const VALID_STATUSES: ReadonlySet<GuardStatus> = new Set<GuardStatus>([
   "active",
@@ -151,25 +177,32 @@ export function BulkImportModal({
   const [parsed, setParsed] = useState<ParsedRow[] | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Guard mode needs the clients list to resolve client_name → client_id, and
-  // the set of id_numbers already in the DB to reject duplicates up front.
+  // Guards + detachments modes resolve client_name → client_id (and guards
+  // also resolve detachment_name within that client). Guards additionally need
+  // the set of existing id_numbers to reject duplicates up front.
   const [clients, setClients] = useState<Client[] | null>(null);
+  const [detachmentsData, setDetachmentsData] = useState<DetachmentLite[]>([]);
   const [existingIdNumbers, setExistingIdNumbers] = useState<Set<string>>(
     new Set(),
   );
+  const needsRefData = mode === "guards" || mode === "detachments";
+
   const { showToast } = useToast();
 
   useEffect(() => {
-    if (mode !== "guards") return;
+    if (!needsRefData) return;
     let active = true;
     (async () => {
       const supabase = createSupabaseClient();
-      const [clientsRes, guardsRes] = await Promise.all([
+      const [clientsRes, detsRes, guardsRes] = await Promise.all([
         supabase
           .from("clients")
           .select("id, name")
           .order("name", { ascending: true }),
-        supabase.from("guards").select("id_number"),
+        supabase.from("detachments").select("id, client_id, name"),
+        mode === "guards"
+          ? supabase.from("guards").select("id_number")
+          : Promise.resolve({ data: [] }),
       ]);
       if (!active) return;
       const ids = new Set<string>();
@@ -179,19 +212,34 @@ export function BulkImportModal({
         if (g.id_number) ids.add(g.id_number.trim().toLowerCase());
       }
       setExistingIdNumbers(ids);
+      setDetachmentsData((detsRes.data ?? []) as DetachmentLite[]);
       setClients((clientsRes.data ?? []) as Client[]);
     })();
     return () => {
       active = false;
     };
-  }, [mode]);
+  }, [mode, needsRefData]);
 
   const title =
-    mode === "clients" ? "Bulk import clients" : "Bulk import guards";
+    mode === "clients"
+      ? "Bulk import clients"
+      : mode === "detachments"
+        ? "Bulk import detachments"
+        : "Bulk import guards";
   const templateName =
-    mode === "clients" ? "clients-template.csv" : "guards-template.csv";
+    mode === "clients"
+      ? "clients-template.csv"
+      : mode === "detachments"
+        ? "detachments-template.csv"
+        : "guards-template.csv";
   const templateContent =
-    mode === "clients" ? CLIENT_TEMPLATE_CSV : GUARD_TEMPLATE_CSV;
+    mode === "clients"
+      ? CLIENT_TEMPLATE_CSV
+      : mode === "detachments"
+        ? DETACHMENT_TEMPLATE_CSV
+        : GUARD_TEMPLATE_CSV;
+  const noun =
+    mode === "clients" ? "client" : mode === "detachments" ? "detachment" : "guard";
 
   function handleDownloadTemplate() {
     downloadAsCsv(templateName, templateContent);
@@ -217,18 +265,30 @@ export function BulkImportModal({
         // Tracks id_numbers seen earlier in this same file so a duplicate
         // within the CSV flags the *second* (and later) occurrences.
         const seenIdNumbers = new Set<string>();
+        const seenDetKeys = new Set<string>();
         const parsedRows: ParsedRow[] =
           mode === "clients"
             ? rows.map((r, i) => parseClientRow(r, i + 2)) // header is row 1
-            : rows.map((r, i) =>
-                parseGuardRow(
-                  r,
-                  i + 2,
-                  clients ?? [],
-                  existingIdNumbers,
-                  seenIdNumbers,
-                ),
-              );
+            : mode === "detachments"
+              ? rows.map((r, i) =>
+                  parseDetachmentRow(
+                    r,
+                    i + 2,
+                    clients ?? [],
+                    detachmentsData,
+                    seenDetKeys,
+                  ),
+                )
+              : rows.map((r, i) =>
+                  parseGuardRow(
+                    r,
+                    i + 2,
+                    clients ?? [],
+                    detachmentsData,
+                    existingIdNumbers,
+                    seenIdNumbers,
+                  ),
+                );
         if (parsedRows.length === 0) {
           setErrorMessage(
             "The file appears to be empty (no rows below the header).",
@@ -261,22 +321,20 @@ export function BulkImportModal({
     const failures: Array<{ index: number; reason: string }> = [];
 
     // Single batch insert; if it fails (RLS/constraint), report and bail.
-    if (mode === "clients") {
-      const payloads = validRows.map((r) => (r as ParsedClientRow & { ok: true }).payload);
-      const { error } = await supabase.from("clients").insert(payloads);
-      if (error) {
-        failures.push({ index: 0, reason: error.message });
-      } else {
-        inserted = payloads.length;
-      }
+    const table =
+      mode === "clients"
+        ? "clients"
+        : mode === "detachments"
+          ? "detachments"
+          : "guards";
+    const payloads = validRows.map(
+      (r) => (r as Extract<ParsedRow, { ok: true }>).payload,
+    );
+    const { error } = await supabase.from(table).insert(payloads);
+    if (error) {
+      failures.push({ index: 0, reason: error.message });
     } else {
-      const payloads = validRows.map((r) => (r as ParsedGuardRow & { ok: true }).payload);
-      const { error } = await supabase.from("guards").insert(payloads);
-      if (error) {
-        failures.push({ index: 0, reason: error.message });
-      } else {
-        inserted = payloads.length;
-      }
+      inserted = payloads.length;
     }
 
     if (failures.length > 0) {
@@ -288,8 +346,8 @@ export function BulkImportModal({
     const skipped = invalidRows.length;
     showToast(
       skipped > 0
-        ? `Imported ${inserted} ${mode === "clients" ? "client" : "guard"}${inserted === 1 ? "" : "s"} · skipped ${skipped} with errors`
-        : `Imported ${inserted} ${mode === "clients" ? "client" : "guard"}${inserted === 1 ? "" : "s"}`,
+        ? `Imported ${inserted} ${noun}${inserted === 1 ? "" : "s"} · skipped ${skipped} with errors`
+        : `Imported ${inserted} ${noun}${inserted === 1 ? "" : "s"}`,
       "success",
     );
     onCompleted();
@@ -309,7 +367,7 @@ export function BulkImportModal({
             ? "Nothing valid to import"
             : invalidRows.length > 0
               ? `Import ${validRows.length}, skip ${invalidRows.length} with errors`
-              : `Import ${validRows.length} ${mode === "clients" ? "client" : "guard"}${validRows.length === 1 ? "" : "s"}`}
+              : `Import ${validRows.length} ${noun}${validRows.length === 1 ? "" : "s"}`}
         </GoldButton>
       ) : phase === "committing" ? (
         <GoldButton type="button" disabled>
@@ -331,7 +389,7 @@ export function BulkImportModal({
           onPickFile={handlePickFile}
           onDownloadTemplate={handleDownloadTemplate}
           fileInputRef={fileInputRef}
-          loadingClients={mode === "guards" && clients === null}
+          loadingClients={needsRefData && clients === null}
         />
       ) : null}
 
@@ -447,7 +505,9 @@ function PickPanel({
           >
             {mode === "clients"
               ? "Columns: name, type, industry, conglomerate, notes"
-              : `Columns: ${GUARD_CSV_COLUMNS.join(", ")}`}
+              : mode === "detachments"
+                ? `Columns: ${DETACHMENT_CSV_COLUMNS.join(", ")}`
+                : `Columns: ${GUARD_CSV_COLUMNS.join(", ")}`}
           </div>
         </div>
         <button
@@ -484,15 +544,24 @@ function BulkRules({ mode }: { mode: BulkMode }) {
           "type accepts single_post or pooled; anything else (including blank) defaults to single_post.",
           "industry, conglomerate, notes are optional.",
         ]
-      : [
-          "id_number, first_name, last_name are required.",
-          "id_number must be unique — both within the file and against existing guards.",
-          "client_name is optional: leave it blank to import the guard as Unassigned. If filled, it's matched case-insensitively to an existing client; unmatched rows go to the error list.",
-          "full_name is recomputed from first_name + middle_name + last_name; the CSV's full_name column is ignored on import.",
-          "status accepts active / reliever / on_leave / inactive; blank defaults to active; any other value is an error.",
-          "birthdate, license_expiry, date_deployed must be YYYY-MM-DD or blank.",
-          "All other columns are optional free text.",
-        ];
+      : mode === "detachments"
+        ? [
+            "client_name and name are required.",
+            "client_name is matched case-insensitively to an existing client; unmatched rows go to the error list.",
+            "name must be unique within its client — both within the file and against existing detachments.",
+            "is_single_post accepts TRUE/FALSE (also yes/no, 1/0); blank defaults to FALSE.",
+            "address and notes are optional free text.",
+          ]
+        : [
+            "id_number, first_name, last_name are required.",
+            "id_number must be unique — both within the file and against existing guards.",
+            "client_name is optional: blank → Unassigned. If filled, matched case-insensitively to a client.",
+            "detachment_name is optional and requires client_name; it's matched (case-insensitive) to a detachment within that client.",
+            "full_name is recomputed from first_name + middle_name + last_name; the CSV's full_name column is ignored on import.",
+            "status accepts active / reliever / on_leave / inactive; blank defaults to active; any other value is an error.",
+            "birthdate, license_expiry, date_deployed must be YYYY-MM-DD or blank.",
+            "All other columns are optional free text.",
+          ];
   return (
     <div
       style={{
@@ -546,7 +615,13 @@ function PreviewPanel({
       >
         <div style={{ display: "flex", gap: 16 }}>
           <SummaryPill
-            label={mode === "clients" ? "Valid clients" : "Valid guards"}
+            label={
+              mode === "clients"
+                ? "Valid clients"
+                : mode === "detachments"
+                  ? "Valid detachments"
+                  : "Valid guards"
+            }
             count={valid.length}
             accent="ok"
           />
@@ -609,8 +684,11 @@ function validPrimary(
   row: Extract<ParsedRow, { ok: true }>,
 ): string {
   if (mode === "clients") {
-    const p = (row as Extract<ParsedClientRow, { ok: true }>).payload;
-    return p.name;
+    return (row as Extract<ParsedClientRow, { ok: true }>).payload.name;
+  }
+  if (mode === "detachments") {
+    const r = row as Extract<ParsedDetachmentRow, { ok: true }>;
+    return `${r.payload.name}  ·  ${r.client_name}`;
   }
   const r = row as Extract<ParsedGuardRow, { ok: true }>;
   return `${r.payload.full_name}  ·  ${r.client_name}`;
@@ -621,21 +699,28 @@ function validSecondary(
 ): string {
   if (mode === "clients") {
     const p = (row as Extract<ParsedClientRow, { ok: true }>).payload;
-    const parts = [
-      p.type,
-      p.industry ?? "",
-      p.conglomerate ?? "",
-    ].filter(Boolean);
-    return parts.join("  ·  ");
+    return [p.type, p.industry ?? "", p.conglomerate ?? ""]
+      .filter(Boolean)
+      .join("  ·  ");
+  }
+  if (mode === "detachments") {
+    const p = (row as Extract<ParsedDetachmentRow, { ok: true }>).payload;
+    return [
+      p.is_single_post ? "Single post" : "Multi-guard",
+      p.address ?? "",
+    ]
+      .filter(Boolean)
+      .join("  ·  ");
   }
   const r = row as Extract<ParsedGuardRow, { ok: true }>;
-  const parts = [
+  return [
     r.payload.status,
     r.payload.id_number,
     r.payload.license_no ?? "",
     r.payload.deployment_location ?? "",
-  ].filter(Boolean);
-  return parts.join("  ·  ");
+  ]
+    .filter(Boolean)
+    .join("  ·  ");
 }
 
 function rawDescription(
@@ -644,6 +729,12 @@ function rawDescription(
 ): string {
   if (mode === "clients") {
     return raw.name ? `name: ${raw.name}` : "row missing name";
+  }
+  if (mode === "detachments") {
+    return [raw.client_name ?? "", raw.name ?? ""]
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .join("  ·  ");
   }
   const name = [raw.first_name ?? "", raw.last_name ?? ""]
     .map((p) => p.trim())
@@ -823,10 +914,76 @@ function parseClientRow(
   };
 }
 
+function parseDetachmentRow(
+  raw: Record<string, string>,
+  rowIndex: number,
+  clients: Client[],
+  existing: DetachmentLite[],
+  seenKeys: Set<string>,
+): ParsedDetachmentRow {
+  const clientName = trimOrNull(raw.client_name);
+  const name = trimOrNull(raw.name);
+  if (!clientName) {
+    return { index: rowIndex, ok: false, reason: "client_name is required", raw };
+  }
+  if (!name) {
+    return { index: rowIndex, ok: false, reason: "name is required", raw };
+  }
+  const match = clients.find(
+    (c) => c.name.toLowerCase() === clientName.toLowerCase(),
+  );
+  if (!match) {
+    return {
+      index: rowIndex,
+      ok: false,
+      reason: `client_name "${clientName}" doesn't match any existing client`,
+      raw,
+    };
+  }
+  // Unique (client, name) — against the DB and earlier CSV rows.
+  const key = `${match.id}::${name.toLowerCase()}`;
+  if (existing.some((d) => d.client_id === match.id && d.name.toLowerCase() === name.toLowerCase())) {
+    return {
+      index: rowIndex,
+      ok: false,
+      reason: `"${match.name}" already has a detachment named "${name}"`,
+      raw,
+    };
+  }
+  if (seenKeys.has(key)) {
+    return {
+      index: rowIndex,
+      ok: false,
+      reason: `detachment "${name}" for "${match.name}" is duplicated earlier in this file`,
+      raw,
+    };
+  }
+  seenKeys.add(key);
+
+  return {
+    index: rowIndex,
+    ok: true,
+    client_name: match.name,
+    payload: {
+      client_id: match.id,
+      name,
+      address: trimOrNull(raw.address),
+      is_single_post: parseBool(raw.is_single_post),
+      notes: trimOrNull(raw.notes),
+    },
+  };
+}
+
+function parseBool(v: unknown): boolean {
+  const t = typeof v === "string" ? v.trim().toLowerCase() : "";
+  return t === "true" || t === "yes" || t === "1" || t === "y";
+}
+
 function parseGuardRow(
   raw: Record<string, string>,
   rowIndex: number,
   clients: Client[],
+  detachments: DetachmentLite[],
   existingIdNumbers: Set<string>,
   seenIdNumbers: Set<string>,
 ): ParsedGuardRow {
@@ -864,9 +1021,21 @@ function parseGuardRow(
   }
 
   // client_name is optional: blank → unassigned; non-blank must match.
+  // detachment_name is optional, requires client_name, and is matched within
+  // the resolved client's detachments.
   const clientName = trimOrNull(raw.client_name);
+  const detachmentName = trimOrNull(raw.detachment_name);
   let clientId: string | null = null;
-  let clientLabel = "Unassigned";
+  let detachmentId: string | null = null;
+  let label = "Unassigned";
+  if (!clientName && detachmentName) {
+    return {
+      index: rowIndex,
+      ok: false,
+      reason: "detachment_name requires client_name",
+      raw,
+    };
+  }
   if (clientName) {
     const lowered = clientName.toLowerCase();
     const match = clients.find((c) => c.name.toLowerCase() === lowered);
@@ -879,7 +1048,23 @@ function parseGuardRow(
       };
     }
     clientId = match.id;
-    clientLabel = match.name;
+    label = match.name;
+    if (detachmentName) {
+      const dLower = detachmentName.toLowerCase();
+      const dMatch = detachments.find(
+        (d) => d.client_id === match.id && d.name.toLowerCase() === dLower,
+      );
+      if (!dMatch) {
+        return {
+          index: rowIndex,
+          ok: false,
+          reason: `detachment_name "${detachmentName}" doesn't match any detachment under "${match.name}"`,
+          raw,
+        };
+      }
+      detachmentId = dMatch.id;
+      label = `${match.name} · ${dMatch.name}`;
+    }
   }
 
   // status: blank → active; non-blank must match the guard_status enum.
@@ -916,9 +1101,10 @@ function parseGuardRow(
   return {
     index: rowIndex,
     ok: true,
-    client_name: clientLabel,
+    client_name: label,
     payload: {
       client_id: clientId,
+      detachment_id: detachmentId,
       full_name: deriveFullName(
         firstName,
         trimOrNull(raw.middle_name),

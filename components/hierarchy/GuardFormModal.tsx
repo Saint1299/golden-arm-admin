@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { GuardAvatar } from "./GuardCard";
 import { Modal } from "@/components/ui/Modal";
 import {
   CancelButton,
@@ -14,9 +15,15 @@ import {
 import { useToast } from "@/components/ui/Toast";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import {
+  deleteGuardPhoto,
+  getGuardPhotoSignedUrl,
+  uploadGuardPhoto,
+} from "@/lib/guard-photo-storage";
+import {
   GUARD_STATUS_LABEL,
   deriveFullName,
   type Client,
+  type Detachment,
   type Guard,
   type GuardStatus,
 } from "@/types/database";
@@ -26,19 +33,27 @@ const STATUS_OPTIONS: Array<{ value: GuardStatus; label: string }> = (
 ).map((s) => ({ value: s, label: GUARD_STATUS_LABEL[s] }));
 
 const FORM_ID = "guard-form";
+const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 
 export function GuardFormModal({
   clientId: presetClientId,
+  detachmentId: presetDetachmentId = null,
+  orgNodeId: presetOrgNodeId = null,
+  lockAssignment = false,
   initialGuard,
   clients,
   onClose,
   onSaved,
 }: {
-  // null = the form must collect a client choice (no calling-page context),
-  // but the choice is now optional (a guard can be left Unassigned).
-  // string = the form locks the client to this id and just adds the guard
-  // under it (used from /hierarchy/clients/[id]'s "Add guard for this client").
+  // Preset/locked client. null = the form collects a client choice.
   clientId: string | null;
+  // Preset detachment (e.g. opened from a detachment page).
+  detachmentId?: string | null;
+  // Preset org-chart node — when adding a NEW guard directly onto a position
+  // (from the org chart tile), the new guard is assigned to this node.
+  orgNodeId?: string | null;
+  // When true, client + detachment are fixed (opened from a detachment page).
+  lockAssignment?: boolean;
   initialGuard: Guard | null;
   clients: Client[];
   onClose: () => void;
@@ -46,6 +61,7 @@ export function GuardFormModal({
 }) {
   const isEditing = Boolean(initialGuard);
   const { showToast } = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Personal info
   const [firstName, setFirstName] = useState(initialGuard?.first_name ?? "");
@@ -64,10 +80,14 @@ export function GuardFormModal({
   const [pagibig, setPagibig] = useState(initialGuard?.pagibig ?? "");
   const [tin, setTin] = useState(initialGuard?.tin ?? "");
 
-  // Employment
+  // Employment / assignment
   const [clientId, setClientId] = useState<string>(
     initialGuard?.client_id ?? presetClientId ?? "",
   );
+  const [detachmentId, setDetachmentId] = useState<string>(
+    initialGuard?.detachment_id ?? presetDetachmentId ?? "",
+  );
+  const [detachments, setDetachments] = useState<Detachment[]>([]);
   const [idNumber, setIdNumber] = useState(initialGuard?.id_number ?? "");
   const [deploymentLocation, setDeploymentLocation] = useState(
     initialGuard?.deployment_location ?? "",
@@ -95,14 +115,123 @@ export function GuardFormModal({
   );
 
   const [notes, setNotes] = useState(initialGuard?.notes ?? "");
+
+  // Photo — 5 states: no file / staged / existing / replace / remove.
+  const existingPhotoPath = initialGuard?.photo_url ?? null;
+  const [existingSignedUrl, setExistingSignedUrl] = useState<string | null>(null);
+  const [stagedFile, setStagedFile] = useState<File | null>(null);
+  const [photoRemoved, setPhotoRemoved] = useState(false);
+
   const [saving, setSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const clientById = useMemo(() => {
-    const m = new Map<string, Client>();
-    for (const c of clients) m.set(c.id, c);
-    return m;
-  }, [clients]);
+  // Load detachments for the selected client so the detachment dropdown can
+  // filter to that client. Re-runs whenever the client changes.
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      if (!clientId) {
+        if (active) setDetachments([]);
+        return;
+      }
+      const supabase = createSupabaseClient();
+      const { data } = await supabase
+        .from("detachments")
+        .select("*")
+        .eq("client_id", clientId)
+        .order("name", { ascending: true });
+      if (!active) return;
+      setDetachments((data ?? []) as Detachment[]);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [clientId]);
+
+  // Resolve the existing photo to a signed URL for preview.
+  useEffect(() => {
+    if (!existingPhotoPath) return;
+    let active = true;
+    (async () => {
+      const supabase = createSupabaseClient();
+      const url = await getGuardPhotoSignedUrl(supabase, existingPhotoPath);
+      if (active) setExistingSignedUrl(url);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [existingPhotoPath]);
+
+  // Object URL for the staged file preview — derived (no setState-in-effect),
+  // with a cleanup effect to revoke it when the file changes/unmounts.
+  const stagedPreview = useMemo(
+    () => (stagedFile ? URL.createObjectURL(stagedFile) : null),
+    [stagedFile],
+  );
+  useEffect(() => {
+    return () => {
+      if (stagedPreview) URL.revokeObjectURL(stagedPreview);
+    };
+  }, [stagedPreview]);
+
+  const previewName = useMemo(
+    () => deriveFullName(firstName, middleName, lastName, initialGuard?.full_name),
+    [firstName, middleName, lastName, initialGuard?.full_name],
+  );
+
+  // Which photo to show in the avatar preview.
+  const previewUrl =
+    stagedPreview ?? (photoRemoved ? null : existingSignedUrl);
+
+  function handlePickPhoto(file: File | null) {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setErrorMessage("Photo must be an image file.");
+      return;
+    }
+    if (file.size > MAX_PHOTO_BYTES) {
+      setErrorMessage("Photo must be 5 MB or smaller.");
+      return;
+    }
+    setErrorMessage(null);
+    setStagedFile(file);
+    setPhotoRemoved(false);
+  }
+
+  function clearStaged() {
+    setStagedFile(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function removeExisting() {
+    clearStaged();
+    setPhotoRemoved(true);
+  }
+
+  function undoRemove() {
+    setPhotoRemoved(false);
+  }
+
+  const clientLocked = lockAssignment || (!isEditing && presetClientId !== null);
+  const lockedClientName =
+    clients.find((c) => c.id === clientId)?.name ?? "Unassigned";
+  const lockedDetachmentName =
+    detachments.find((d) => d.id === detachmentId)?.name ?? "None";
+
+  const clientOptions = useMemo(
+    () => [
+      { value: "", label: "Unassigned" },
+      ...clients.map((c) => ({ value: c.id, label: c.name })),
+    ],
+    [clients],
+  );
+  const detachmentOptions = useMemo(
+    () => [
+      { value: "", label: "No detachment" },
+      ...detachments.map((d) => ({ value: d.id, label: d.name })),
+    ],
+    [detachments],
+  );
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -117,6 +246,27 @@ export function GuardFormModal({
     setSaving(true);
     setErrorMessage(null);
 
+    const supabase = createSupabaseClient();
+    const guardId = initialGuard?.id ?? crypto.randomUUID();
+
+    // Resolve the photo path. Upload happens before the row write; on a failed
+    // write we clean up the freshly-uploaded orphan.
+    let finalPhoto: string | null = existingPhotoPath;
+    let uploadedNow: string | null = null;
+    if (stagedFile) {
+      const { path, error } = await uploadGuardPhoto(supabase, guardId, stagedFile);
+      if (error || !path) {
+        setErrorMessage(`Photo upload failed: ${error ?? "unknown error"}`);
+        showToast("Photo upload failed", "error");
+        setSaving(false);
+        return;
+      }
+      uploadedNow = path;
+      finalPhoto = path;
+    } else if (photoRemoved) {
+      finalPhoto = null;
+    }
+
     const fullName = deriveFullName(
       firstName,
       middleName,
@@ -124,9 +274,20 @@ export function GuardFormModal({
       initialGuard?.full_name,
     );
 
+    // A chosen detachment implies its client; keep them in sync.
+    const resolvedClientId = detachmentId
+      ? detachments.find((d) => d.id === detachmentId)?.client_id ??
+        (clientId || null)
+      : clientId || null;
+
     const payload = {
-      client_id: clientId ? clientId : null,
-      org_node_id: initialGuard?.org_node_id ?? null,
+      client_id: resolvedClientId,
+      detachment_id: detachmentId ? detachmentId : null,
+      // Editing preserves the guard's existing node; a new guard added from a
+      // chart tile is assigned to the preset node.
+      org_node_id: initialGuard
+        ? initialGuard.org_node_id ?? null
+        : presetOrgNodeId ?? null,
       full_name: fullName,
       first_name: firstName.trim(),
       middle_name: middleName.trim() ? middleName.trim() : null,
@@ -149,17 +310,16 @@ export function GuardFormModal({
       date_deployed: dateDeployed ? dateDeployed : null,
       status,
       notes: trimOrNull(notes),
+      photo_url: finalPhoto,
     };
 
-    const supabase = createSupabaseClient();
     const { error } = initialGuard
       ? await supabase.from("guards").update(payload).eq("id", initialGuard.id)
-      : await supabase.from("guards").insert(payload);
+      : await supabase.from("guards").insert({ ...payload, id: guardId });
 
     if (error) {
-      // 23505 = unique_violation. The only unique constraint surfaced to the
-      // user here is id_number — turn the raw Postgres message into something
-      // readable.
+      // Clean up the orphaned upload so we don't leave a dangling object.
+      if (uploadedNow) await deleteGuardPhoto(supabase, uploadedNow);
       const message =
         error.code === "23505"
           ? `ID number "${idNumber.trim()}" is already used by another guard.`
@@ -169,20 +329,19 @@ export function GuardFormModal({
       setSaving(false);
       return;
     }
+
+    // Best-effort cleanup of a replaced/removed previous photo.
+    if (
+      (uploadedNow || photoRemoved) &&
+      existingPhotoPath &&
+      existingPhotoPath !== finalPhoto
+    ) {
+      await deleteGuardPhoto(supabase, existingPhotoPath);
+    }
+
     showToast(isEditing ? "Guard updated" : "Guard added", "success");
     onSaved();
   }
-
-  const clientLocked = !isEditing && presetClientId !== null;
-  const lockedClient = clientLocked ? clientById.get(presetClientId!) : null;
-
-  const clientOptions = useMemo(
-    () => [
-      { value: "", label: "Unassigned" },
-      ...clients.map((c) => ({ value: c.id, label: c.name })),
-    ],
-    [clients],
-  );
 
   return (
     <Modal
@@ -204,6 +363,62 @@ export function GuardFormModal({
       }
     >
       <form id={FORM_ID} onSubmit={handleSubmit}>
+        <Section title="Photo">
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            <GuardAvatar
+              name={previewName || "Guard"}
+              photoUrl={previewUrl}
+              size={72}
+            />
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={(e) => handlePickPhoto(e.target.files?.[0] ?? null)}
+              style={{ display: "none" }}
+            />
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+              <PhotoButton
+                label={previewUrl ? "Replace photo" : "Add photo"}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={saving}
+              />
+              {stagedFile ? (
+                <PhotoButton
+                  label="Cancel new photo"
+                  onClick={clearStaged}
+                  disabled={saving}
+                />
+              ) : existingSignedUrl && !photoRemoved ? (
+                <PhotoButton
+                  label="Remove photo"
+                  onClick={removeExisting}
+                  disabled={saving}
+                  danger
+                />
+              ) : photoRemoved && existingPhotoPath ? (
+                <PhotoButton
+                  label="Undo remove"
+                  onClick={undoRemove}
+                  disabled={saving}
+                />
+              ) : null}
+            </div>
+          </div>
+          {photoRemoved && existingPhotoPath && !stagedFile ? (
+            <p
+              style={{
+                marginTop: 10,
+                marginBottom: 0,
+                fontSize: 11,
+                color: "rgba(245, 158, 11, 0.85)",
+              }}
+            >
+              Photo will be removed when you save.
+            </p>
+          ) : null}
+        </Section>
+
         <Section title="Personal info">
           <Field label="First name" htmlFor="guard-first-name">
             <TextInput
@@ -266,10 +481,7 @@ export function GuardFormModal({
               disabled={saving}
             />
           </Field>
-          <Field
-            label="Educational attainment"
-            htmlFor="guard-education"
-          >
+          <Field label="Educational attainment" htmlFor="guard-education">
             <TextInput
               id="guard-education"
               value={educationalAttainment}
@@ -283,107 +495,88 @@ export function GuardFormModal({
         <Section title="Government IDs">
           <Row>
             <Field label="SSS" htmlFor="guard-sss">
-              <TextInput
-                id="guard-sss"
-                value={sss}
-                onChange={setSss}
-                placeholder="SSS no."
-                disabled={saving}
-              />
+              <TextInput id="guard-sss" value={sss} onChange={setSss} placeholder="SSS no." disabled={saving} />
             </Field>
             <Field label="PhilHealth" htmlFor="guard-philhealth">
-              <TextInput
-                id="guard-philhealth"
-                value={philhealth}
-                onChange={setPhilhealth}
-                placeholder="PhilHealth no."
-                disabled={saving}
-              />
+              <TextInput id="guard-philhealth" value={philhealth} onChange={setPhilhealth} placeholder="PhilHealth no." disabled={saving} />
             </Field>
           </Row>
           <Row>
             <Field label="Pag-IBIG" htmlFor="guard-pagibig">
-              <TextInput
-                id="guard-pagibig"
-                value={pagibig}
-                onChange={setPagibig}
-                placeholder="Pag-IBIG no."
-                disabled={saving}
-              />
+              <TextInput id="guard-pagibig" value={pagibig} onChange={setPagibig} placeholder="Pag-IBIG no." disabled={saving} />
             </Field>
             <Field label="TIN" htmlFor="guard-tin">
-              <TextInput
-                id="guard-tin"
-                value={tin}
-                onChange={setTin}
-                placeholder="TIN"
-                disabled={saving}
-              />
+              <TextInput id="guard-tin" value={tin} onChange={setTin} placeholder="TIN" disabled={saving} />
             </Field>
           </Row>
         </Section>
 
-        <Section title="Employment">
+        <Section title="Assignment">
           {clientLocked ? (
-            <Field label="Client">
-              <ReadOnlyValue>{lockedClient?.name ?? "—"}</ReadOnlyValue>
-            </Field>
+            <Row>
+              <Field label="Client">
+                <ReadOnlyValue>{lockedClientName}</ReadOnlyValue>
+              </Field>
+              <Field label="Detachment">
+                <ReadOnlyValue>
+                  {presetDetachmentId || detachmentId
+                    ? lockedDetachmentName
+                    : "None"}
+                </ReadOnlyValue>
+              </Field>
+            </Row>
           ) : (
-            <Field
-              label="Client (optional)"
-              htmlFor="guard-client"
-              helper="Leave as Unassigned for guards not yet deployed to a client."
-            >
-              <SelectInput
-                id="guard-client"
-                value={clientId}
-                onChange={(v) => {
-                  setClientId(v);
-                  setErrorMessage(null);
-                }}
-                options={clientOptions}
-                disabled={saving}
-              />
-            </Field>
+            <Row>
+              <Field
+                label="Client (optional)"
+                htmlFor="guard-client"
+                helper="Leave Unassigned for guards not yet deployed."
+              >
+                <SelectInput
+                  id="guard-client"
+                  value={clientId}
+                  onChange={(v) => {
+                    setClientId(v);
+                    setDetachmentId("");
+                    setErrorMessage(null);
+                  }}
+                  options={clientOptions}
+                  disabled={saving}
+                />
+              </Field>
+              <Field
+                label="Detachment (optional)"
+                htmlFor="guard-detachment"
+                helper={
+                  clientId
+                    ? "Filtered to the selected client."
+                    : "Pick a client first."
+                }
+              >
+                <SelectInput
+                  id="guard-detachment"
+                  value={detachmentId}
+                  onChange={setDetachmentId}
+                  options={detachmentOptions}
+                  disabled={saving || !clientId || detachments.length === 0}
+                />
+              </Field>
+            </Row>
           )}
           <Row>
             <Field label="ID number" htmlFor="guard-id-number">
-              <TextInput
-                id="guard-id-number"
-                value={idNumber}
-                onChange={setIdNumber}
-                placeholder="e.g. GA-0142"
-                disabled={saving}
-              />
+              <TextInput id="guard-id-number" value={idNumber} onChange={setIdNumber} placeholder="e.g. GA-0142" disabled={saving} />
             </Field>
             <Field label="Deployment location" htmlFor="guard-deployment-loc">
-              <TextInput
-                id="guard-deployment-loc"
-                value={deploymentLocation}
-                onChange={setDeploymentLocation}
-                placeholder="e.g. Main lobby, Tower B"
-                disabled={saving}
-              />
+              <TextInput id="guard-deployment-loc" value={deploymentLocation} onChange={setDeploymentLocation} placeholder="e.g. Main lobby" disabled={saving} />
             </Field>
           </Row>
           <Row>
             <Field label="Date deployed" htmlFor="guard-date">
-              <TextInput
-                id="guard-date"
-                value={dateDeployed}
-                onChange={setDateDeployed}
-                type="date"
-                disabled={saving}
-              />
+              <TextInput id="guard-date" value={dateDeployed} onChange={setDateDeployed} type="date" disabled={saving} />
             </Field>
             <Field label="Status" htmlFor="guard-status">
-              <SelectInput
-                id="guard-status"
-                value={status}
-                onChange={(v) => setStatus(v as GuardStatus)}
-                options={STATUS_OPTIONS}
-                disabled={saving}
-              />
+              <SelectInput id="guard-status" value={status} onChange={(v) => setStatus(v as GuardStatus)} options={STATUS_OPTIONS} disabled={saving} />
             </Field>
           </Row>
         </Section>
@@ -391,72 +584,31 @@ export function GuardFormModal({
         <Section title="License">
           <Row>
             <Field label="License category" htmlFor="guard-license-cat">
-              <TextInput
-                id="guard-license-cat"
-                value={licenseCategory}
-                onChange={setLicenseCategory}
-                placeholder="e.g. SG"
-                disabled={saving}
-              />
+              <TextInput id="guard-license-cat" value={licenseCategory} onChange={setLicenseCategory} placeholder="e.g. SG" disabled={saving} />
             </Field>
             <Field label="License no." htmlFor="guard-license-no">
-              <TextInput
-                id="guard-license-no"
-                value={licenseNo}
-                onChange={setLicenseNo}
-                placeholder="License no."
-                disabled={saving}
-              />
+              <TextInput id="guard-license-no" value={licenseNo} onChange={setLicenseNo} placeholder="License no." disabled={saving} />
             </Field>
           </Row>
           <Field label="License expiry" htmlFor="guard-license-expiry">
-            <TextInput
-              id="guard-license-expiry"
-              value={licenseExpiry}
-              onChange={setLicenseExpiry}
-              type="date"
-              disabled={saving}
-            />
+            <TextInput id="guard-license-expiry" value={licenseExpiry} onChange={setLicenseExpiry} type="date" disabled={saving} />
           </Field>
         </Section>
 
         <Section title="Contact">
           <Row>
             <Field label="Contact no." htmlFor="guard-contact">
-              <TextInput
-                id="guard-contact"
-                value={contactNo}
-                onChange={setContactNo}
-                type="tel"
-                placeholder="e.g. 0917 000 0000"
-                disabled={saving}
-              />
+              <TextInput id="guard-contact" value={contactNo} onChange={setContactNo} type="tel" placeholder="e.g. 0917 000 0000" disabled={saving} />
             </Field>
-            <Field
-              label="Emergency contact no."
-              htmlFor="guard-emergency-contact"
-            >
-              <TextInput
-                id="guard-emergency-contact"
-                value={emergencyContactNo}
-                onChange={setEmergencyContactNo}
-                type="tel"
-                placeholder="e.g. 0917 000 0000"
-                disabled={saving}
-              />
+            <Field label="Emergency contact no." htmlFor="guard-emergency-contact">
+              <TextInput id="guard-emergency-contact" value={emergencyContactNo} onChange={setEmergencyContactNo} type="tel" placeholder="e.g. 0917 000 0000" disabled={saving} />
             </Field>
           </Row>
         </Section>
 
         <Section title="Notes" last>
           <Field label="Notes" htmlFor="guard-notes">
-            <TextArea
-              id="guard-notes"
-              value={notes}
-              onChange={setNotes}
-              placeholder="Internal notes, post assignment details, etc."
-              disabled={saving}
-            />
+            <TextArea id="guard-notes" value={notes} onChange={setNotes} placeholder="Internal notes, post assignment details, etc." disabled={saving} />
           </Field>
         </Section>
       </form>
@@ -467,6 +619,39 @@ export function GuardFormModal({
 function trimOrNull(v: string): string | null {
   const t = v.trim();
   return t.length === 0 ? null : t;
+}
+
+function PhotoButton({
+  label,
+  onClick,
+  disabled,
+  danger,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        background: "rgba(255, 255, 255, 0.04)",
+        border: `1px solid ${danger ? "rgba(239, 68, 68, 0.3)" : "rgba(255, 255, 255, 0.12)"}`,
+        color: danger ? "#ef4444" : "rgba(245, 245, 247, 0.8)",
+        borderRadius: 8,
+        padding: "8px 14px",
+        fontSize: 13,
+        fontWeight: 500,
+        fontFamily: "inherit",
+        cursor: disabled ? "not-allowed" : "pointer",
+      }}
+    >
+      {label}
+    </button>
+  );
 }
 
 function Row({ children }: { children: ReactNode }) {

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type CSSProperties, type ReactNode } from "react";
 import { GuardStatusBadge } from "./badges";
+import { GuardAvatar } from "./GuardCard";
 import { GuardFormModal } from "./GuardFormModal";
 import { SubjectCompliancePanel } from "@/components/compliance/SubjectCompliancePanel";
 import { GuardInventoryPanel } from "@/components/inventory/GuardInventoryPanel";
@@ -11,7 +12,7 @@ import { GlassCard } from "@/components/ui/GlassCard";
 import { useToast } from "@/components/ui/Toast";
 import { ALERT_ACCENT, computeAlertStatus } from "@/lib/compliance";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
-import type { Client, Guard } from "@/types/database";
+import type { Client, Detachment, Guard } from "@/types/database";
 
 type Tab = "details" | "inventory" | "compliance";
 
@@ -37,10 +38,14 @@ export function GuardDetailView({
   guard,
   client,
   clients,
+  detachment,
+  photoUrl,
 }: {
   guard: Guard;
   client: Client | null;
   clients: Client[];
+  detachment: Detachment | null;
+  photoUrl: string | null;
 }) {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<Tab>("details");
@@ -78,19 +83,24 @@ export function GuardDetailView({
           marginTop: 8,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <h1
-            style={{
-              fontSize: 28,
-              fontWeight: 600,
-              letterSpacing: "-0.02em",
-              color: "#f5f5f7",
-              margin: 0,
-            }}
-          >
-            {guard.full_name}
-          </h1>
-          <GuardStatusBadge status={guard.status} />
+        <div style={{ display: "flex", alignItems: "center", gap: 18, minWidth: 0 }}>
+          <GuardAvatar name={guard.full_name} photoUrl={photoUrl} size={128} />
+          <div style={{ minWidth: 0 }}>
+            <h1
+              style={{
+                fontSize: 28,
+                fontWeight: 600,
+                letterSpacing: "-0.02em",
+                color: "#f5f5f7",
+                margin: 0,
+              }}
+            >
+              {guard.full_name}
+            </h1>
+            <div style={{ marginTop: 10 }}>
+              <GuardStatusBadge status={guard.status} />
+            </div>
+          </div>
         </div>
         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
           <button
@@ -124,7 +134,7 @@ export function GuardDetailView({
       <div style={{ height: 20 }} />
 
       {activeTab === "details" ? (
-        <DetailsTab guard={guard} client={client} />
+        <DetailsTab guard={guard} client={client} detachment={detachment} />
       ) : null}
       {activeTab === "inventory" ? (
         <GuardInventoryPanel guardId={guard.id} guardName={guard.full_name} />
@@ -268,9 +278,11 @@ function computeAge(birthdate: string | null): number | null {
 function DetailsTab({
   guard,
   client,
+  detachment,
 }: {
   guard: Guard;
   client: Client | null;
+  detachment: Detachment | null;
 }) {
   const age = computeAge(guard.birthdate);
   const birthdateValue = guard.birthdate
@@ -325,6 +337,10 @@ function DetailsTab({
         <DetailItem
           label="Client"
           value={client?.name ?? "Unassigned"}
+        />
+        <DetailItem
+          label="Detachment"
+          value={detachment?.name ?? (guard.detachment_id ? "—" : "None")}
         />
         <DetailItem
           label="Deployment location"

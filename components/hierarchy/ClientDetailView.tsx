@@ -9,15 +9,28 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { ClientTypeBadge, GuardStatusBadge } from "./badges";
+import {
+  ClientTypeBadge,
+  DetachmentTypeBadge,
+  GuardStatusBadge,
+} from "./badges";
 import { ClientFormModal } from "./ClientFormModal";
-import { GuardFormModal } from "./GuardFormModal";
-import { OrgChartCanvas } from "./OrgChartCanvas";
+import { DetachmentFormModal } from "./DetachmentFormModal";
+import { ExpiringLicensesBanner, type ExpiringRow } from "./ExpiringLicensesBanner";
 import { SubjectCompliancePanel } from "@/components/compliance/SubjectCompliancePanel";
 import { GlassCard } from "@/components/ui/GlassCard";
+import { Modal } from "@/components/ui/Modal";
+import {
+  CancelButton,
+  Field,
+  FormError,
+  GoldButton,
+  SelectInput,
+} from "@/components/ui/form";
 import { useToast } from "@/components/ui/Toast";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
-import type { Client, Guard, OrgNode } from "@/types/database";
+import { expiringGuards } from "@/lib/license";
+import type { Client, Detachment, Guard } from "@/types/database";
 
 const goldButtonStyle: CSSProperties = {
   display: "inline-flex",
@@ -47,73 +60,86 @@ const secondaryButtonStyle: CSSProperties = {
   cursor: "pointer",
 };
 
-const headerCellStyle: CSSProperties = {
-  textAlign: "left",
-  fontSize: 11,
-  fontWeight: 500,
-  letterSpacing: "0.06em",
-  textTransform: "uppercase",
-  color: "rgba(245, 245, 247, 0.4)",
-  padding: "10px 14px",
-  borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
-  whiteSpace: "nowrap",
-};
-
-const bodyCellStyle: CSSProperties = {
-  fontSize: 13,
-  color: "rgba(245, 245, 247, 0.65)",
-  padding: "12px 14px",
-  borderBottom: "1px solid rgba(255, 255, 255, 0.04)",
-  whiteSpace: "nowrap",
-};
-
 export function ClientDetailView({
   client: initialClient,
-  clients,
   initialGuards,
-  initialNodes,
+  initialDetachments,
 }: {
   client: Client;
-  clients: Client[];
   initialGuards: Guard[];
-  // Pre-fetched only for pooled clients. For single_post we pass an empty
-  // array; the chart isn't rendered, so the data is never used.
-  initialNodes: OrgNode[];
+  initialDetachments: Detachment[];
 }) {
   const router = useRouter();
   const { showToast } = useToast();
 
-  // The client itself can be edited — keep it in state so post-edit refetch
-  // reflects in the header / info chips without a full page reload.
   const [client, setClient] = useState<Client>(initialClient);
   const [guards, setGuards] = useState<Guard[]>(initialGuards);
+  const [detachments, setDetachments] =
+    useState<Detachment[]>(initialDetachments);
   const [clientEditOpen, setClientEditOpen] = useState(false);
-  const [guardModal, setGuardModal] = useState<{
+  const [detModal, setDetModal] = useState<{
     open: boolean;
-    editing: Guard | null;
+    editing: Detachment | null;
   }>({ open: false, editing: null });
+  const [moveGuard, setMoveGuard] = useState<Guard | null>(null);
 
-  const refetchGuards = useCallback(async () => {
+  const refetch = useCallback(async () => {
     const supabase = createSupabaseClient();
-    const [clientRes, guardsRes] = await Promise.all([
-      supabase
-        .from("clients")
-        .select("*")
-        .eq("id", client.id)
-        .maybeSingle(),
+    const [clientRes, guardsRes, detsRes] = await Promise.all([
+      supabase.from("clients").select("*").eq("id", client.id).maybeSingle(),
       supabase
         .from("guards")
         .select("*")
         .eq("client_id", client.id)
         .order("full_name", { ascending: true }),
+      supabase
+        .from("detachments")
+        .select("*")
+        .eq("client_id", client.id)
+        .order("name", { ascending: true }),
     ]);
     if (clientRes.data) setClient(clientRes.data as Client);
     setGuards((guardsRes.data ?? []) as Guard[]);
+    setDetachments((detsRes.data ?? []) as Detachment[]);
   }, [client.id]);
+
+  const detachmentNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const d of detachments) m.set(d.id, d.name);
+    return m;
+  }, [detachments]);
+
+  const guardCountByDetachment = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const g of guards) {
+      if (!g.detachment_id) continue;
+      m.set(g.detachment_id, (m.get(g.detachment_id) ?? 0) + 1);
+    }
+    return m;
+  }, [guards]);
+
+  const unassignedGuards = useMemo(
+    () => guards.filter((g) => !g.detachment_id),
+    [guards],
+  );
+
+  const expiringRows: ExpiringRow[] = useMemo(
+    () =>
+      expiringGuards(guards).map(({ guard, days }) => ({
+        guardId: guard.id,
+        guardName: guard.full_name,
+        detachmentName: guard.detachment_id
+          ? detachmentNameById.get(guard.detachment_id) ?? "Unknown detachment"
+          : null,
+        expiry: guard.license_expiry,
+        days,
+      })),
+    [guards, detachmentNameById],
+  );
 
   async function handleDeleteClient() {
     const ok = window.confirm(
-      `Delete "${client.name}"? Clients with guards can't be deleted until their guards are removed.`,
+      `Delete "${client.name}"? This also deletes its detachments. Guards under them will be unassigned (not deleted).`,
     );
     if (!ok) return;
     const supabase = createSupabaseClient();
@@ -122,38 +148,33 @@ export function ClientDetailView({
       .delete()
       .eq("id", client.id);
     if (error) {
-      const msg = /foreign key|violates/i.test(error.message)
-        ? "Client has guards and can't be deleted. Reassign or remove them first."
-        : error.message;
-      showToast(msg, "error");
+      showToast(error.message, "error");
       return;
     }
     showToast("Client deleted", "success");
     router.push("/hierarchy");
   }
 
-  async function handleDeleteGuard(guard: Guard) {
+  async function handleDeleteDetachment(d: Detachment) {
+    const count = guardCountByDetachment.get(d.id) ?? 0;
     const ok = window.confirm(
-      `Delete ${guard.full_name}? This permanently removes the guard record.`,
+      count > 0
+        ? `Delete "${d.name}"? Its ${count} guard${count === 1 ? "" : "s"} will be unassigned from the detachment (not deleted), and its org chart will be removed.`
+        : `Delete "${d.name}"? Its org chart will be removed.`,
     );
     if (!ok) return;
     const supabase = createSupabaseClient();
-    const { error } = await supabase
-      .from("guards")
-      .delete()
-      .eq("id", guard.id);
+    const { error } = await supabase.from("detachments").delete().eq("id", d.id);
     if (error) {
       showToast(error.message, "error");
       return;
     }
-    showToast("Guard deleted", "success");
-    refetchGuards();
+    showToast("Detachment deleted", "success");
+    refetch();
   }
 
-  const isPooled = client.type === "pooled";
-
   return (
-    <div style={{ maxWidth: 1280 }}>
+    <div style={{ maxWidth: 1100 }}>
       <Breadcrumb clientName={client.name} />
 
       {/* Header */}
@@ -191,6 +212,7 @@ export function ClientDetailView({
           </div>
           <InfoChips
             client={client}
+            detachmentCount={detachments.length}
             guardCount={guards.length}
           />
         </div>
@@ -218,43 +240,90 @@ export function ClientDetailView({
 
       <div style={{ height: 24 }} />
 
-      {/* Body — chart for pooled, flat guards list for single_post */}
-      {isPooled ? (
-        <OrgChartCanvas
-          client={client}
-          initialNodes={initialNodes}
-          initialGuards={initialGuards}
-        />
+      <ExpiringLicensesBanner rows={expiringRows} />
+
+      {/* Detachments */}
+      <SectionHeader
+        title="Detachments"
+        action={
+          <button
+            type="button"
+            style={goldButtonStyle}
+            onClick={() => setDetModal({ open: true, editing: null })}
+          >
+            <PlusIcon />
+            Add detachment
+          </button>
+        }
+      />
+      <div style={{ height: 12 }} />
+      {detachments.length === 0 ? (
+        <GlassCard>
+          <div
+            style={{
+              padding: "32px 24px",
+              textAlign: "center",
+              color: "rgba(245, 245, 247, 0.6)",
+              fontSize: 13,
+            }}
+          >
+            No detachments yet. Add one to start deploying guards.
+          </div>
+        </GlassCard>
       ) : (
-        <SinglePostBody
-          guards={guards}
-          onAddGuard={() =>
-            setGuardModal({ open: true, editing: null })
-          }
-          onEditGuard={(g) =>
-            setGuardModal({ open: true, editing: g })
-          }
-          onDeleteGuard={handleDeleteGuard}
-        />
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {detachments.map((d) => (
+            <DetachmentRow
+              key={d.id}
+              clientId={client.id}
+              detachment={d}
+              guardCount={guardCountByDetachment.get(d.id) ?? 0}
+              onEdit={() => setDetModal({ open: true, editing: d })}
+              onDelete={() => handleDeleteDetachment(d)}
+            />
+          ))}
+        </div>
       )}
 
-      {/* Compliance documents — same SubjectCompliancePanel used elsewhere.
-          No outer collapsible wrapper: the panel renders its own Valid /
-          Due Soon / Expired grouping internally, so wrapping it again would
-          mean two layers of collapse. */}
+      {/* Guards not yet assigned to a detachment */}
+      {unassignedGuards.length > 0 ? (
+        <>
+          <div style={{ height: 32 }} />
+          <SectionHeader title="Guards not yet assigned to a detachment" />
+          <div style={{ height: 12 }} />
+          <GlassCard style={{ padding: 0, overflow: "hidden" }}>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={headerCellStyle}>Name</th>
+                    <th style={headerCellStyle}>ID Number</th>
+                    <th style={headerCellStyle}>License No</th>
+                    <th style={headerCellStyle}>Status</th>
+                    <th style={{ ...headerCellStyle, textAlign: "right" }} />
+                  </tr>
+                </thead>
+                <tbody>
+                  {unassignedGuards.map((g, idx) => (
+                    <UnassignedGuardRow
+                      key={g.id}
+                      guard={g}
+                      striped={idx % 2 === 1}
+                      canMove={detachments.length > 0}
+                      onMove={() => setMoveGuard(g)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </GlassCard>
+        </>
+      ) : null}
+
+      {/* Compliance documents */}
       <div style={{ height: 32 }} />
-      <h2
-        style={{
-          fontSize: 16,
-          fontWeight: 600,
-          color: "#f5f5f7",
-          letterSpacing: "-0.01em",
-          margin: 0,
-          marginBottom: 12,
-        }}
-      >
-        Compliance documents
-      </h2>
+      <SectionHeader title="Compliance documents" />
+      <div style={{ height: 12 }} />
       <SubjectCompliancePanel
         subjectScope="client"
         subjectId={client.id}
@@ -268,20 +337,31 @@ export function ClientDetailView({
           onClose={() => setClientEditOpen(false)}
           onSaved={() => {
             setClientEditOpen(false);
-            refetchGuards();
+            refetch();
           }}
         />
       ) : null}
 
-      {guardModal.open ? (
-        <GuardFormModal
+      {detModal.open ? (
+        <DetachmentFormModal
           clientId={client.id}
-          initialGuard={guardModal.editing}
-          clients={clients}
-          onClose={() => setGuardModal({ open: false, editing: null })}
+          initialDetachment={detModal.editing}
+          onClose={() => setDetModal({ open: false, editing: null })}
           onSaved={() => {
-            setGuardModal({ open: false, editing: null });
-            refetchGuards();
+            setDetModal({ open: false, editing: null });
+            refetch();
+          }}
+        />
+      ) : null}
+
+      {moveGuard ? (
+        <MoveToDetachmentModal
+          guard={moveGuard}
+          detachments={detachments}
+          onClose={() => setMoveGuard(null)}
+          onSaved={() => {
+            setMoveGuard(null);
+            refetch();
           }}
         />
       ) : null}
@@ -305,7 +385,7 @@ function Breadcrumb({ clientName }: { clientName: string }) {
         href="/hierarchy"
         style={{ color: "rgba(245, 245, 247, 0.6)", textDecoration: "none" }}
       >
-        Guard Deployment
+        Clients
       </Link>
       <span aria-hidden>/</span>
       <span style={{ color: "rgba(245, 245, 247, 0.7)" }}>{clientName}</span>
@@ -315,20 +395,20 @@ function Breadcrumb({ clientName }: { clientName: string }) {
 
 function InfoChips({
   client,
+  detachmentCount,
   guardCount,
 }: {
   client: Client;
+  detachmentCount: number;
   guardCount: number;
 }) {
-  const chips: Array<{ label: string; value: string }> = [];
-  chips.push({
-    label: "Guards",
-    value: String(guardCount),
-  });
+  const chips: Array<{ label: string; value: string }> = [
+    { label: "Detachments", value: String(detachmentCount) },
+    { label: "Guards", value: String(guardCount) },
+  ];
   if (client.industry) chips.push({ label: "Industry", value: client.industry });
   if (client.conglomerate)
     chips.push({ label: "Conglomerate", value: client.conglomerate });
-  if (chips.length === 0) return null;
   return (
     <div
       style={{
@@ -342,11 +422,7 @@ function InfoChips({
       {chips.map((c, i) => (
         <div
           key={i}
-          style={{
-            display: "inline-flex",
-            alignItems: "baseline",
-            gap: 6,
-          }}
+          style={{ display: "inline-flex", alignItems: "baseline", gap: 6 }}
         >
           <span
             style={{
@@ -368,148 +444,145 @@ function InfoChips({
   );
 }
 
-function SinglePostBody({
-  guards,
-  onAddGuard,
-  onEditGuard,
-  onDeleteGuard,
+function SectionHeader({
+  title,
+  action,
 }: {
-  guards: Guard[];
-  onAddGuard: () => void;
-  onEditGuard: (g: Guard) => void;
-  onDeleteGuard: (g: Guard) => void;
+  title: string;
+  action?: ReactNode;
 }) {
-  const sorted = useMemo(
-    () => [...guards].sort((a, b) => a.full_name.localeCompare(b.full_name)),
-    [guards],
-  );
   return (
-    <div>
-      <div
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-end",
+        justifyContent: "space-between",
+        gap: 16,
+        flexWrap: "wrap",
+      }}
+    >
+      <h2
         style={{
-          display: "flex",
-          alignItems: "flex-end",
-          justifyContent: "space-between",
-          gap: 16,
-          flexWrap: "wrap",
+          fontSize: 16,
+          fontWeight: 600,
+          color: "#f5f5f7",
+          letterSpacing: "-0.01em",
+          margin: 0,
         }}
       >
-        <div>
-          <h2
-            style={{
-              fontSize: 16,
-              fontWeight: 600,
-              color: "#f5f5f7",
-              letterSpacing: "-0.01em",
-              margin: 0,
-            }}
-          >
-            Guards
-          </h2>
-          <p
-            style={{
-              marginTop: 6,
-              marginBottom: 0,
-              fontSize: 12,
-              color: "rgba(245, 245, 247, 0.5)",
-            }}
-          >
-            Single-post clients don&rsquo;t have an org chart.
-          </p>
-        </div>
-        <button type="button" style={goldButtonStyle} onClick={onAddGuard}>
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="#080b12"
-            strokeWidth="2"
-            strokeLinecap="round"
-            aria-hidden
-          >
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-          Add guard for this client
-        </button>
-      </div>
-
-      <div style={{ height: 12 }} />
-
-      <GlassCard style={{ padding: 0, overflow: "hidden" }}>
-        {sorted.length === 0 ? (
-          <div
-            style={{
-              padding: "40px 24px",
-              textAlign: "center",
-              color: "rgba(245, 245, 247, 0.6)",
-              fontSize: 13,
-            }}
-          >
-            No guards deployed to this client yet.
-          </div>
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  <th style={headerCellStyle}>Name</th>
-                  <th style={headerCellStyle}>ID Number</th>
-                  <th style={headerCellStyle}>License No</th>
-                  <th style={headerCellStyle}>Contact</th>
-                  <th style={headerCellStyle}>Deployment Location</th>
-                  <th style={headerCellStyle}>Status</th>
-                  <th
-                    style={{
-                      ...headerCellStyle,
-                      textAlign: "right",
-                      width: 100,
-                    }}
-                  />
-                </tr>
-              </thead>
-              <tbody>
-                {sorted.map((g, idx) => (
-                  <GuardRow
-                    key={g.id}
-                    guard={g}
-                    striped={idx % 2 === 1}
-                    onEdit={() => onEditGuard(g)}
-                    onDelete={() => onDeleteGuard(g)}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </GlassCard>
+        {title}
+      </h2>
+      {action}
     </div>
   );
 }
 
-function GuardRow({
-  guard,
-  striped,
+function DetachmentRow({
+  clientId,
+  detachment,
+  guardCount,
   onEdit,
   onDelete,
 }: {
-  guard: Guard;
-  striped: boolean;
+  clientId: string;
+  detachment: Detachment;
+  guardCount: number;
   onEdit: () => void;
   onDelete: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <GlassCard
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        padding: 0,
+        border: hover
+          ? "1px solid rgba(201, 169, 97, 0.35)"
+          : "1px solid rgba(255, 255, 255, 0.08)",
+        transition: "border-color 150ms ease-out",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: 16 }}>
+        <Link
+          href={`/hierarchy/clients/${clientId}/detachments/${detachment.id}`}
+          style={{ flex: 1, minWidth: 0, textDecoration: "none" }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              flexWrap: "wrap",
+            }}
+          >
+            <span
+              style={{
+                fontSize: 15,
+                fontWeight: 600,
+                color: "#f5f5f7",
+                letterSpacing: "-0.01em",
+              }}
+            >
+              {detachment.name}
+            </span>
+            <DetachmentTypeBadge isSinglePost={detachment.is_single_post} />
+            <span
+              className="tabular"
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                backgroundColor: "rgba(201, 169, 97, 0.14)",
+                color: "#d4b670",
+                padding: "2px 8px",
+                borderRadius: 999,
+              }}
+            >
+              {guardCount} guard{guardCount === 1 ? "" : "s"}
+            </span>
+          </div>
+          {detachment.address ? (
+            <div
+              style={{
+                marginTop: 6,
+                fontSize: 12.5,
+                color: "rgba(245, 245, 247, 0.55)",
+              }}
+            >
+              {detachment.address}
+            </div>
+          ) : null}
+        </Link>
+        <div style={{ display: "inline-flex", gap: 14, flexShrink: 0 }}>
+          <RowAction label="Edit" onClick={onEdit} />
+          <RowAction label="Delete" onClick={onDelete} danger />
+        </div>
+      </div>
+    </GlassCard>
+  );
+}
+
+function UnassignedGuardRow({
+  guard,
+  striped,
+  canMove,
+  onMove,
+}: {
+  guard: Guard;
+  striped: boolean;
+  canMove: boolean;
+  onMove: () => void;
 }) {
   const router = useRouter();
   const [hover, setHover] = useState(false);
   const baseBg = striped ? "rgba(255, 255, 255, 0.015)" : "transparent";
-  const bg = hover ? "rgba(255, 255, 255, 0.035)" : baseBg;
   return (
     <tr
       onClick={() => router.push(`/hierarchy/guards/${guard.id}`)}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
-        backgroundColor: bg,
+        backgroundColor: hover ? "rgba(255, 255, 255, 0.035)" : baseBg,
         cursor: "pointer",
         transition: "background-color 150ms ease-out",
       }}
@@ -523,10 +596,6 @@ function GuardRow({
       <td style={bodyCellStyle} className="tabular">
         {guard.license_no ?? "—"}
       </td>
-      <td style={bodyCellStyle} className="tabular">
-        {guard.contact_no ?? "—"}
-      </td>
-      <td style={bodyCellStyle}>{guard.deployment_location ?? "—"}</td>
       <td style={bodyCellStyle}>
         <GuardStatusBadge status={guard.status} />
       </td>
@@ -534,11 +603,79 @@ function GuardRow({
         style={{ ...bodyCellStyle, textAlign: "right" }}
         onClick={(e) => e.stopPropagation()}
       >
-        <RowAction label="Edit" onClick={onEdit} />
-        <span style={{ display: "inline-block", width: 10 }} />
-        <RowAction label="Delete" onClick={onDelete} danger />
+        <RowAction
+          label="Move to detachment"
+          onClick={onMove}
+          disabled={!canMove}
+        />
       </td>
     </tr>
+  );
+}
+
+function MoveToDetachmentModal({
+  guard,
+  detachments,
+  onClose,
+  onSaved,
+}: {
+  guard: Guard;
+  detachments: Detachment[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { showToast } = useToast();
+  const [detachmentId, setDetachmentId] = useState(detachments[0]?.id ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    if (!detachmentId) {
+      setError("Pick a detachment.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    const supabase = createSupabaseClient();
+    const { error: err } = await supabase
+      .from("guards")
+      .update({ detachment_id: detachmentId })
+      .eq("id", guard.id);
+    if (err) {
+      setError(err.message);
+      showToast(err.message, "error");
+      setSaving(false);
+      return;
+    }
+    showToast(`${guard.full_name} moved`, "success");
+    onSaved();
+  }
+
+  return (
+    <Modal title={`Move ${guard.full_name}`} onClose={onClose}>
+      <Field
+        label="Detachment"
+        htmlFor="move-detachment"
+        helper="The guard will be assigned to this detachment."
+      >
+        <SelectInput
+          id="move-detachment"
+          value={detachmentId}
+          onChange={setDetachmentId}
+          options={detachments.map((d) => ({ value: d.id, label: d.name }))}
+          disabled={saving}
+        />
+      </Field>
+      <FormError message={error} />
+      <div style={{ height: 24 }} />
+      <GoldButton type="button" onClick={handleSave} disabled={saving}>
+        {saving ? "Moving…" : "Move guard"}
+      </GoldButton>
+      <div style={{ height: 12 }} />
+      <div style={{ display: "flex", justifyContent: "center" }}>
+        <CancelButton onClick={onClose} disabled={saving} />
+      </div>
+    </Modal>
   );
 }
 
@@ -546,25 +683,30 @@ function RowAction({
   label,
   onClick,
   danger,
+  disabled,
 }: {
   label: string;
   onClick: () => void;
   danger?: boolean;
-}): ReactNode {
+  disabled?: boolean;
+}) {
   const [hover, setHover] = useState(false);
-  const color = danger
-    ? hover
-      ? "#ef4444"
-      : "rgba(239, 68, 68, 0.7)"
-    : hover
-      ? "#f5f5f7"
-      : "rgba(245, 245, 247, 0.5)";
+  const color = disabled
+    ? "rgba(245, 245, 247, 0.25)"
+    : danger
+      ? hover
+        ? "#ef4444"
+        : "rgba(239, 68, 68, 0.7)"
+      : hover
+        ? "#f5f5f7"
+        : "rgba(245, 245, 247, 0.55)";
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={disabled ? undefined : onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      disabled={disabled}
       style={{
         background: "transparent",
         border: "none",
@@ -572,12 +714,50 @@ function RowAction({
         fontSize: 12,
         fontWeight: 500,
         fontFamily: "inherit",
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
         color,
         transition: "color 150ms ease-out",
       }}
     >
       {label}
     </button>
+  );
+}
+
+const headerCellStyle: CSSProperties = {
+  textAlign: "left",
+  fontSize: 11,
+  fontWeight: 500,
+  letterSpacing: "0.06em",
+  textTransform: "uppercase",
+  color: "rgba(245, 245, 247, 0.4)",
+  padding: "10px 14px",
+  borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
+  whiteSpace: "nowrap",
+};
+
+const bodyCellStyle: CSSProperties = {
+  fontSize: 13,
+  color: "rgba(245, 245, 247, 0.65)",
+  padding: "12px 14px",
+  borderBottom: "1px solid rgba(255, 255, 255, 0.04)",
+  whiteSpace: "nowrap",
+};
+
+function PlusIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="#080b12"
+      strokeWidth="2"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
   );
 }

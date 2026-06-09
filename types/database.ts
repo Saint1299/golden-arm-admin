@@ -13,13 +13,32 @@ export type Client = {
   created_at: string;
 };
 
-export type OrgNode = {
+export type Detachment = {
   id: string;
   client_id: string;
+  name: string;
+  address: string | null;
+  is_single_post: boolean;
+  notes: string | null;
+  created_at: string;
+};
+
+export type OrgNode = {
+  id: string;
+  // Nullable as of migration 0010 — new org nodes hang off a detachment, not
+  // a client. Legacy client-scoped nodes (detachment_id null) are ignored by
+  // the detachment org chart.
+  client_id: string | null;
+  detachment_id: string | null;
   parent_node_id: string | null;
   label: string;
   level: number;
   sort_order: number;
+  // Free-form positioning for detached (floating) nodes. Null while the node
+  // lives in the tree; set when is_detached is true.
+  is_detached: boolean;
+  pos_x: number | null;
+  pos_y: number | null;
   created_at: string;
 };
 
@@ -47,6 +66,12 @@ export type Guard = {
   id_number: string | null;
   employee_no: string | null;
   deployment_location: string | null;
+  // Assignment (migration 0010). detachment_id nullable — a guard can be
+  // unassigned, assigned to a client only, or assigned to a detachment.
+  detachment_id: string | null;
+  // Storage path (bucket-relative) in the private guard-photos bucket, or a
+  // legacy http(s) URL. Display goes through a short-lived signed URL.
+  photo_url: string | null;
   // License — sosia_license was renamed to license_no in migration 0009.
   license_category: string | null;
   license_no: string | null;

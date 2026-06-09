@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
 import { GuardDetailView } from "@/components/hierarchy/GuardDetailView";
+import { getGuardPhotoSignedUrl } from "@/lib/guard-photo-storage";
 import { createClient } from "@/lib/supabase/server";
-import type { Client, Guard } from "@/types/database";
+import type { Client, Detachment, Guard } from "@/types/database";
 
 export const metadata: Metadata = {
   title: "Guard · Golden Arm Admin",
@@ -31,11 +32,24 @@ export default async function GuardDetailRoute({
   const clients = (clientsRes.data ?? []) as Client[];
   const client = clients.find((c) => c.id === typedGuard.client_id) ?? null;
 
+  const [detRes, photoUrl] = await Promise.all([
+    typedGuard.detachment_id
+      ? supabase
+          .from("detachments")
+          .select("*")
+          .eq("id", typedGuard.detachment_id)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
+    getGuardPhotoSignedUrl(supabase, typedGuard.photo_url),
+  ]);
+
   return (
     <GuardDetailView
       guard={typedGuard}
       client={client}
       clients={clients}
+      detachment={(detRes.data as Detachment | null) ?? null}
+      photoUrl={photoUrl}
     />
   );
 }

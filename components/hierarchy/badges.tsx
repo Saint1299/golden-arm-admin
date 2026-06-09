@@ -44,3 +44,14 @@ export function GuardStatusBadge({ status }: { status: GuardStatus }) {
     </span>
   );
 }
+
+export function DetachmentTypeBadge({ isSinglePost }: { isSinglePost: boolean }) {
+  const pill = isSinglePost
+    ? { bg: "rgba(99, 102, 241, 0.14)", fg: "#a5a8f5" }
+    : { bg: "rgba(201, 169, 97, 0.14)", fg: "#d4b670" };
+  return (
+    <span style={{ ...pillBase, backgroundColor: pill.bg, color: pill.fg }}>
+      {isSinglePost ? "Single Post" : "Multi-Guard"}
+    </span>
+  );
+}

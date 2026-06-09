@@ -1,15 +1,28 @@
-import type { CSSProperties, ReactNode } from "react";
+import type { CSSProperties, MouseEventHandler, ReactNode } from "react";
 
 type GlassCardProps = {
   children: ReactNode;
   className?: string;
   style?: CSSProperties;
+  onClick?: MouseEventHandler<HTMLDivElement>;
+  onMouseEnter?: MouseEventHandler<HTMLDivElement>;
+  onMouseLeave?: MouseEventHandler<HTMLDivElement>;
 };
 
-export function GlassCard({ children, className = "", style }: GlassCardProps) {
+export function GlassCard({
+  children,
+  className = "",
+  style,
+  onClick,
+  onMouseEnter,
+  onMouseLeave,
+}: GlassCardProps) {
   return (
     <div
       className={className}
+      onClick={onClick}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
       style={{
         backgroundColor: "rgba(255, 255, 255, 0.03)",
         backdropFilter: "blur(20px) saturate(180%)",
