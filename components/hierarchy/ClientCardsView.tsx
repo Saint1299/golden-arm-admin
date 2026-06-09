@@ -237,100 +237,125 @@ function ClientCardItem({
       onClick={onOpen}
       style={{
         cursor: "pointer",
+        padding: 22,
+        backgroundColor: hover
+          ? "rgba(255, 255, 255, 0.05)"
+          : "rgba(255, 255, 255, 0.03)",
         border: hover
           ? "1px solid rgba(201, 169, 97, 0.4)"
           : "1px solid rgba(255, 255, 255, 0.08)",
         boxShadow: hover
           ? "0 10px 30px rgba(0, 0, 0, 0.4)"
           : "0 6px 20px rgba(0, 0, 0, 0.25)",
-        transition: "border-color 150ms ease-out, box-shadow 150ms ease-out",
+        transition:
+          "border-color 150ms ease-out, box-shadow 150ms ease-out, background-color 150ms ease-out",
       }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
+      {/* Top row: identity (left) + hero metric (right) */}
       <div
         style={{
-          fontSize: 17,
-          fontWeight: 600,
-          color: "#f5f5f7",
-          letterSpacing: "-0.01em",
-        }}
-      >
-        {card.name}
-      </div>
-      {card.conglomerate ? (
-        <div
-          style={{
-            marginTop: 4,
-            fontSize: 12.5,
-            color: "rgba(245, 245, 247, 0.5)",
-          }}
-        >
-          {card.conglomerate}
-        </div>
-      ) : null}
-
-      <div
-        style={{
-          marginTop: 16,
           display: "flex",
-          gap: 20,
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: 16,
         }}
       >
-        <Stat label="Detachments" value={card.detachmentCount} />
-        <Stat label="Guards" value={card.guardCount} />
-      </div>
-
-      {card.expiringCount > 0 ? (
-        <div
-          style={{
-            marginTop: 16,
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "5px 10px",
-            borderRadius: 999,
-            backgroundColor: "rgba(201, 169, 97, 0.14)",
-            border: "1px solid rgba(201, 169, 97, 0.35)",
-          }}
-        >
-          <span
-            className="tabular"
-            style={{ fontSize: 12.5, fontWeight: 700, color: "#d4b670" }}
+        <div style={{ minWidth: 0 }}>
+          <div
+            style={{
+              fontSize: 18,
+              fontWeight: 500,
+              color: "#f5f5f7",
+              letterSpacing: "-0.01em",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
           >
-            {card.expiringCount}
-          </span>
-          <span style={{ fontSize: 11.5, color: "#d4b670" }}>
-            license{card.expiringCount === 1 ? "" : "s"} expiring
-          </span>
+            {card.name}
+          </div>
+          {card.industry ? (
+            <div
+              style={{
+                marginTop: 3,
+                fontSize: 13,
+                color: "rgba(245, 245, 247, 0.5)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {card.industry}
+            </div>
+          ) : null}
+          {card.conglomerate ? (
+            <div
+              style={{
+                marginTop: 3,
+                fontSize: 12,
+                color: "rgba(245, 245, 247, 0.35)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {card.conglomerate}
+            </div>
+          ) : null}
         </div>
-      ) : null}
-    </GlassCard>
-  );
-}
 
-function Stat({ label, value }: { label: string; value: number }) {
-  return (
-    <div>
-      <div
-        className="tabular"
-        style={{ fontSize: 22, fontWeight: 600, color: "#f5f5f7" }}
-      >
-        {value}
+        <div style={{ flexShrink: 0, textAlign: "right" }}>
+          <div
+            className="tabular"
+            style={{
+              fontSize: 30,
+              fontWeight: 500,
+              lineHeight: 1,
+              margin: 0,
+              color: "#f5f5f7",
+            }}
+          >
+            {card.guardCount}
+          </div>
+          <div
+            style={{
+              marginTop: 5,
+              fontSize: 11,
+              fontWeight: 500,
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+              color: "rgba(245, 245, 247, 0.4)",
+            }}
+          >
+            Guards
+          </div>
+        </div>
       </div>
+
+      {/* Divider */}
       <div
         style={{
-          marginTop: 2,
-          fontSize: 10.5,
-          fontWeight: 500,
-          letterSpacing: "0.06em",
-          textTransform: "uppercase",
-          color: "rgba(245, 245, 247, 0.4)",
+          marginTop: 18,
+          paddingTop: 14,
+          borderTop: "0.5px solid rgba(255, 255, 255, 0.1)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          fontSize: 12.5,
         }}
       >
-        {label}
+        <span style={{ color: "rgba(245, 245, 247, 0.55)" }}>
+          {card.detachmentCount} detachment{card.detachmentCount === 1 ? "" : "s"}
+        </span>
+        {card.expiringCount > 0 ? (
+          <span style={{ color: "#d4b670", fontWeight: 500 }}>
+            {card.expiringCount} expiring soon
+          </span>
+        ) : null}
       </div>
-    </div>
+    </GlassCard>
   );
 }
 
