@@ -22,7 +22,7 @@ import {
   type DragStartEvent,
 } from "@dnd-kit/core";
 import { GuardStatusBadge } from "./badges";
-import { GuardAvatar } from "./GuardCard";
+import { GuardAvatar, GuardPhotoBlock } from "./GuardCard";
 import { GuardFormModal } from "./GuardFormModal";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { Modal } from "@/components/ui/Modal";
@@ -51,9 +51,11 @@ const UNASSIGNED_ID = "unassigned";
 const ROOT_PARENT = "__root__";
 
 // Fixed tile box → uniform layout + exact connector anchor points (no DOM
-// measurement needed). Content is arranged to fit this height.
-const TILE_W = 230;
+// measurement needed). Half-and-half tile: full-height photo column on the
+// left, guard info on the right.
+const TILE_W = 280;
 const TILE_H = 150;
+const PHOTO_W = 120;
 const H_GAP = 28;
 const ROW_H = TILE_H + 56;
 const PAD = 24;
@@ -888,6 +890,14 @@ function NodeTile({
   const extra = guards.length - 1;
   const positioned = node.pos_x !== null && node.pos_y !== null;
 
+  const days = guard ? daysRemaining(guard.license_expiry) : null;
+  const expiryStatus = guard ? computeAlertStatus(guard.license_expiry) : "ok";
+  const showExpiry =
+    guard !== null &&
+    guard.license_expiry !== null &&
+    days !== null &&
+    days <= 30;
+
   const borderColor = droppable.isOver
     ? "rgba(201, 169, 97, 0.8)"
     : positioned
@@ -921,146 +931,206 @@ function NodeTile({
           : droppable.isOver
             ? "0 0 0 3px rgba(201, 169, 97, 0.18)"
             : "0 6px 20px rgba(0, 0, 0, 0.3)",
-        padding: 12,
         cursor: draggable.isDragging ? "grabbing" : "grab",
         opacity: draggable.isDragging ? 0.85 : 1,
         touchAction: "none",
         display: "flex",
-        flexDirection: "column",
+        flexDirection: "row",
         overflow: "hidden",
         transition: draggable.isDragging
           ? "none"
           : "border-color 150ms ease-out, box-shadow 150ms ease-out",
       }}
     >
+      {/* Photo column (left) — full height, edge-to-edge */}
       <div
         style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 6,
+          position: "relative",
+          width: PHOTO_W,
+          flexShrink: 0,
+          overflow: "hidden",
+          backgroundColor: "rgba(255, 255, 255, 0.03)",
         }}
       >
-        <div
-          style={{
-            fontSize: 10,
-            fontWeight: 600,
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-            color: "rgba(245, 245, 247, 0.45)",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {node.label}
-        </div>
-        {positioned ? (
+        {guard ? (
+          <GuardPhotoBlock
+            name={guard.full_name}
+            photoUrl={photoUrls[guard.id] ?? null}
+          />
+        ) : (
+          <EmptyPhoto />
+        )}
+        {extra > 0 ? (
           <span
-            title="Manually positioned"
+            className="tabular"
+            title={`${extra} more guard${extra === 1 ? "" : "s"} on this position`}
             style={{
-              fontSize: 9,
-              fontWeight: 600,
-              color: "#c9a961",
-              flexShrink: 0,
+              position: "absolute",
+              top: 6,
+              left: 6,
+              fontSize: 10,
+              fontWeight: 700,
+              padding: "2px 6px",
+              borderRadius: 999,
+              color: "#080b12",
+              backgroundColor: "rgba(245, 158, 11, 0.92)",
             }}
           >
-            ●
+            +{extra}
           </span>
         ) : null}
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, marginTop: 10 }}>
+      {/* Info column (right) */}
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          padding: 14,
+          display: "flex",
+          flexDirection: "column",
+          gap: 3,
+        }}
+      >
         {guard ? (
-          <AssignedGuard guard={guard} photoUrl={photoUrls[guard.id] ?? null} />
+          <>
+            <div
+              style={{
+                fontSize: 15,
+                fontWeight: 500,
+                color: "#f5f5f7",
+                letterSpacing: "-0.01em",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {guard.full_name}
+            </div>
+            <div
+              style={{
+                fontSize: 11,
+                color: "rgba(245, 245, 247, 0.55)",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {node.label}
+            </div>
+            {showExpiry ? (
+              <span
+                style={{
+                  alignSelf: "flex-start",
+                  fontSize: 10,
+                  fontWeight: 600,
+                  padding: "1px 6px",
+                  borderRadius: 4,
+                  color: ALERT_ACCENT[expiryStatus].fg,
+                  backgroundColor: ALERT_ACCENT[expiryStatus].bg,
+                  border: `1px solid ${ALERT_ACCENT[expiryStatus].border}`,
+                }}
+              >
+                {days! < 0 ? "License expired" : `Expires in ${days}d`}
+              </span>
+            ) : (
+              <div
+                className="tabular"
+                style={{
+                  fontSize: 11,
+                  color: "rgba(245, 245, 247, 0.45)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {guard.license_no ?? "No license"}
+              </div>
+            )}
+            <div style={{ marginTop: "auto", paddingTop: 4 }}>
+              <GuardStatusBadge status={guard.status} />
+            </div>
+          </>
         ) : (
-          <div
-            style={{
-              height: "100%",
-              display: "flex",
-              alignItems: "center",
-              fontSize: 11.5,
-              color: "rgba(245, 245, 247, 0.35)",
-            }}
-          >
-            Drop a guard here, or click to assign
-          </div>
+          <>
+            <div
+              style={{
+                fontSize: 13,
+                fontWeight: 500,
+                color: "#f5f5f7",
+                letterSpacing: "-0.01em",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {node.label}
+            </div>
+            <div
+              style={{
+                fontSize: 11,
+                color: "rgba(245, 245, 247, 0.35)",
+                lineHeight: 1.4,
+              }}
+            >
+              Drop a guard here, or click to assign
+            </div>
+          </>
         )}
       </div>
 
-      {extra > 0 ? (
-        <div style={{ fontSize: 11, color: "rgba(245, 158, 11, 0.85)" }}>
-          +{extra} more on this position
-        </div>
+      {/* Manually-positioned indicator — top-right corner (info side) */}
+      {positioned ? (
+        <span
+          title="Manually positioned"
+          aria-hidden
+          style={{
+            position: "absolute",
+            top: 8,
+            right: 8,
+            width: 8,
+            height: 8,
+            borderRadius: "50%",
+            backgroundColor: "#d4b670",
+            boxShadow: "0 0 0 2px rgba(8, 11, 18, 0.6)",
+          }}
+        />
       ) : null}
     </div>
   );
 }
 
-function AssignedGuard({
-  guard,
-  photoUrl,
-}: {
-  guard: Guard;
-  photoUrl: string | null;
-}) {
-  const days = daysRemaining(guard.license_expiry);
-  const status = computeAlertStatus(guard.license_expiry);
-  const showExpiry =
-    guard.license_expiry !== null && days !== null && days <= 30;
+function EmptyPhoto() {
   return (
-    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-      <GuardAvatar name={guard.full_name} photoUrl={photoUrl} size={44} />
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: "#f5f5f7",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {guard.full_name}
-        </div>
-        <div
-          className="tabular"
-          style={{
-            fontSize: 11,
-            color: "rgba(245, 245, 247, 0.55)",
-            marginTop: 2,
-          }}
-        >
-          {guard.license_no ?? "No license"}
-        </div>
-        <div
-          style={{
-            marginTop: 5,
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            flexWrap: "wrap",
-          }}
-        >
-          <GuardStatusBadge status={guard.status} />
-          {showExpiry ? (
-            <span
-              style={{
-                fontSize: 10,
-                fontWeight: 600,
-                padding: "2px 6px",
-                borderRadius: 4,
-                color: ALERT_ACCENT[status].fg,
-                backgroundColor: ALERT_ACCENT[status].bg,
-                border: `1px solid ${ALERT_ACCENT[status].border}`,
-              }}
-            >
-              {days! < 0 ? "License expired" : `Expires in ${days}d`}
-            </span>
-          ) : null}
-        </div>
-      </div>
+    <div
+      aria-hidden
+      style={{
+        width: "100%",
+        height: "100%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background:
+          "linear-gradient(135deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015))",
+        color: "rgba(245, 245, 247, 0.18)",
+      }}
+    >
+      {/* user-plus */}
+      <svg
+        width="38"
+        height="38"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M14 19c0-3.3-2.7-5-6-5s-6 1.7-6 5" />
+        <circle cx="8" cy="8" r="4" />
+        <line x1="19" y1="8" x2="19" y2="14" />
+        <line x1="16" y1="11" x2="22" y2="11" />
+      </svg>
     </div>
   );
 }

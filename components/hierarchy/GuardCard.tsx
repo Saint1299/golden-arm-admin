@@ -80,6 +80,55 @@ export function GuardAvatar({
   );
 }
 
+// A rectangular, edge-to-edge photo block (vs the round GuardAvatar). Fills
+// its parent; the parent decides the dimensions. Real photos crop with
+// object-fit: cover; unphotographed guards get the gradient + initials.
+export function GuardPhotoBlock({
+  name,
+  photoUrl,
+}: {
+  name: string;
+  photoUrl: string | null;
+}) {
+  const [errored, setErrored] = useState(false);
+  if (photoUrl && !errored) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={photoUrl}
+        alt={name}
+        onError={() => setErrored(true)}
+        style={{
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+          display: "block",
+        }}
+      />
+    );
+  }
+  return (
+    <div
+      aria-hidden
+      style={{
+        width: "100%",
+        height: "100%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: gradientFor(name),
+        color: "rgba(245, 245, 247, 0.92)",
+        fontWeight: 600,
+        fontSize: 32,
+        letterSpacing: "0.02em",
+        userSelect: "none",
+      }}
+    >
+      {initials(name)}
+    </div>
+  );
+}
+
 // A clickable guard summary card: avatar + name + license + status. Used in
 // the detachment single-post body and various lists. `photoUrl` is a signed
 // URL resolved by the caller (server batch or client fetch).
