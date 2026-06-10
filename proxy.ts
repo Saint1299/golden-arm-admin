@@ -1,7 +1,11 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PUBLIC_PATHS = new Set(["/login"]);
+const PUBLIC_PATHS = new Set([
+  "/login",
+  "/forgot-password",
+  "/reset-password",
+]);
 const STATIC_ASSET_EXT = /\.(svg|png|jpg|jpeg|gif|webp|ico|js|css|map|woff2?)$/;
 
 function isPublicPath(pathname: string): boolean {

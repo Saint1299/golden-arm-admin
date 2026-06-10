@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type CSSProperties } from "react";
 import { createClient } from "@/lib/supabase/client";
@@ -143,8 +144,8 @@ export function LoginForm() {
       <div style={{ height: 8 }} />
 
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
-        <a
-          href="#"
+        <Link
+          href="/forgot-password"
           onMouseEnter={() => setForgotHover(true)}
           onMouseLeave={() => setForgotHover(false)}
           style={{
@@ -157,7 +158,7 @@ export function LoginForm() {
           }}
         >
           Forgot password?
-        </a>
+        </Link>
       </div>
 
       <div style={{ height: 24 }} />

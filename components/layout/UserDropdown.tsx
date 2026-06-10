@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useSignOut } from "@/lib/auth/sign-out";
 
@@ -188,6 +189,12 @@ export function UserDropdown({ email, fullName }: Props) {
             </div>
           </div>
 
+          <MenuLink
+            label="Account"
+            href="/account"
+            onNavigate={() => setOpen(false)}
+          />
+
           <MenuButton
             label={signingOut ? "Signing out…" : "Sign out"}
             disabled={signingOut}
@@ -223,6 +230,42 @@ function Avatar({ initials }: { initials: string }) {
     >
       {initials}
     </span>
+  );
+}
+
+function MenuLink({
+  label,
+  href,
+  onNavigate,
+}: {
+  label: string;
+  href: string;
+  onNavigate: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <Link
+      href={href}
+      role="menuitem"
+      onClick={onNavigate}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        display: "block",
+        width: "100%",
+        textAlign: "left",
+        padding: "8px 10px",
+        borderRadius: 6,
+        fontFamily: "inherit",
+        fontSize: 13,
+        color: "#f5f5f7",
+        textDecoration: "none",
+        background: hover ? "rgba(255, 255, 255, 0.06)" : "transparent",
+        transition: "background-color 150ms ease-out, color 150ms ease-out",
+      }}
+    >
+      {label}
+    </Link>
   );
 }
 
