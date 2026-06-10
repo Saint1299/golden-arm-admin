@@ -501,6 +501,7 @@ function DetachmentRow({
       <div style={{ display: "flex", alignItems: "center", gap: 12, padding: 16 }}>
         <Link
           href={`/hierarchy/clients/${clientId}/detachments/${detachment.id}`}
+          prefetch
           style={{ flex: 1, minWidth: 0, textDecoration: "none" }}
         >
           <div

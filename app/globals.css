@@ -176,6 +176,23 @@ h6 {
   }
 }
 
+/* Loading skeleton shimmer — subtle opacity pulse on a light-tinted box. */
+@keyframes ga-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+.ga-skeleton {
+  background-color: rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  animation: ga-skeleton-pulse 1.5s ease-in-out infinite;
+}
+
 /* ---------------------------------------------------------------------------
    Org chart tree connectors (Milestone 2).
    Pure-CSS nested-list org chart: each <li> draws the elbow connectors to its

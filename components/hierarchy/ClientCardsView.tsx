@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 import {
   useCallback,
   useMemo,
@@ -53,7 +53,6 @@ export function ClientCardsView({
 }: {
   initialCards: ClientCard[];
 }) {
-  const router = useRouter();
   const [cards, setCards] = useState<ClientCard[]>(initialCards);
   const [search, setSearch] = useState("");
   const [clientModalOpen, setClientModalOpen] = useState(false);
@@ -190,11 +189,7 @@ export function ClientCardsView({
           }}
         >
           {filtered.map((c) => (
-            <ClientCardItem
-              key={c.id}
-              card={c}
-              onOpen={() => router.push(`/hierarchy/clients/${c.id}`)}
-            />
+            <ClientCardItem key={c.id} card={c} />
           ))}
         </div>
       )}
@@ -224,20 +219,20 @@ export function ClientCardsView({
   );
 }
 
-function ClientCardItem({
-  card,
-  onOpen,
-}: {
-  card: ClientCard;
-  onOpen: () => void;
-}) {
+function ClientCardItem({ card }: { card: ClientCard }) {
   const [hover, setHover] = useState(false);
   return (
-    <GlassCard
-      onClick={onOpen}
-      style={{
-        cursor: "pointer",
-        padding: 22,
+    <Link
+      href={`/hierarchy/clients/${card.id}`}
+      prefetch
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{ textDecoration: "none", display: "block" }}
+    >
+      <GlassCard
+        style={{
+          cursor: "pointer",
+          padding: 22,
         backgroundColor: hover
           ? "rgba(255, 255, 255, 0.05)"
           : "rgba(255, 255, 255, 0.03)",
@@ -249,10 +244,8 @@ function ClientCardItem({
           : "0 6px 20px rgba(0, 0, 0, 0.25)",
         transition:
           "border-color 150ms ease-out, box-shadow 150ms ease-out, background-color 150ms ease-out",
-      }}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-    >
+        }}
+      >
       {/* Top row: identity (left) + hero metric (right) */}
       <div
         style={{
@@ -355,7 +348,8 @@ function ClientCardItem({
           </span>
         ) : null}
       </div>
-    </GlassCard>
+      </GlassCard>
+    </Link>
   );
 }
 
