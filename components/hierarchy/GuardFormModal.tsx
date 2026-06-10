@@ -33,6 +33,10 @@ const STATUS_OPTIONS: Array<{ value: GuardStatus; label: string }> = (
 ).map((s) => ({ value: s, label: GUARD_STATUS_LABEL[s] }));
 
 const FORM_ID = "guard-form";
+
+// Shared width for the photo-row controls (buttons + shift select) so they
+// read as sibling buttons.
+const PHOTO_BTN_WIDTH = 140;
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 
 export function GuardFormModal({
@@ -98,9 +102,10 @@ export function GuardFormModal({
   const [dateDeployed, setDateDeployed] = useState(
     initialGuard?.date_deployed ?? "",
   );
-  const [isReliever, setIsReliever] = useState(
-    initialGuard?.is_reliever ?? presetReliever,
+  const [shiftType, setShiftType] = useState<string>(
+    initialGuard?.shift_type ?? (presetReliever ? "reliever" : ""),
   );
+  const isReliever = shiftType === "reliever";
   const [status, setStatus] = useState<GuardStatus>(
     initialGuard?.status ?? "active",
   );
@@ -290,14 +295,15 @@ export function GuardFormModal({
       client_id: resolvedClientId,
       detachment_id: detachmentId ? detachmentId : null,
       // Editing preserves the guard's existing node; a new guard added from a
-      // chart tile is assigned to the preset node.
-      // Relievers never hold a tree position; clear org_node_id when reliever.
+      // chart tile is assigned to the preset node. Relievers hold no position.
       org_node_id: isReliever
         ? null
         : initialGuard
           ? initialGuard.org_node_id ?? null
           : presetOrgNodeId ?? null,
+      // Dual-write is_reliever from shift_type so legacy readers keep working.
       is_reliever: isReliever,
+      shift_type: shiftType === "" ? null : (shiftType as Guard["shift_type"]),
       full_name: fullName,
       first_name: firstName.trim(),
       middle_name: middleName.trim() ? middleName.trim() : null,
@@ -374,7 +380,14 @@ export function GuardFormModal({
     >
       <form id={FORM_ID} onSubmit={handleSubmit}>
         <Section title="Photo">
-          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 16,
+              flexWrap: "wrap",
+            }}
+          >
             <GuardAvatar
               name={previewName || "Guard"}
               photoUrl={previewUrl}
@@ -413,6 +426,22 @@ export function GuardFormModal({
                   disabled={saving}
                 />
               ) : null}
+            </div>
+            {/* Shift assignment — quiet inline select at the far right of the
+                photo row, sized to match the photo buttons. */}
+            <div style={{ marginLeft: "auto", width: PHOTO_BTN_WIDTH, flexShrink: 0 }}>
+              <SelectInput
+                id="guard-shift-type"
+                value={shiftType}
+                onChange={setShiftType}
+                options={[
+                  { value: "", label: "Unspecified" },
+                  { value: "day", label: "Day shift" },
+                  { value: "night", label: "Night shift" },
+                  { value: "reliever", label: "Reliever (standby)" },
+                ]}
+                disabled={saving}
+              />
             </div>
           </div>
           {photoRemoved && existingPhotoPath && !stagedFile ? (
@@ -522,65 +551,6 @@ export function GuardFormModal({
         </Section>
 
         <Section title="Assignment">
-          <button
-            type="button"
-            onClick={() => setIsReliever((v) => !v)}
-            disabled={saving}
-            style={{
-              display: "flex",
-              alignItems: "flex-start",
-              gap: 10,
-              width: "100%",
-              textAlign: "left",
-              background: "transparent",
-              border: "none",
-              padding: 0,
-              marginBottom: 16,
-              cursor: saving ? "not-allowed" : "pointer",
-              fontFamily: "inherit",
-            }}
-          >
-            <span
-              aria-hidden
-              style={{
-                marginTop: 1,
-                flexShrink: 0,
-                width: 18,
-                height: 18,
-                borderRadius: 5,
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                backgroundColor: isReliever
-                  ? "rgba(201, 169, 97, 0.2)"
-                  : "rgba(255, 255, 255, 0.04)",
-                border: `1px solid ${isReliever ? "rgba(201, 169, 97, 0.6)" : "rgba(255, 255, 255, 0.18)"}`,
-              }}
-            >
-              {isReliever ? (
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#d4b670" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              ) : null}
-            </span>
-            <span>
-              <span style={{ fontSize: 14, color: "#f5f5f7", fontWeight: 500 }}>
-                Mark as reliever (standby, not in org chart)
-              </span>
-              <span
-                style={{
-                  display: "block",
-                  marginTop: 2,
-                  fontSize: 11,
-                  color: "rgba(245, 245, 247, 0.45)",
-                }}
-              >
-                Relievers live in the detachment’s Relievers strip and aren’t
-                placed in the org tree.
-              </span>
-            </span>
-          </button>
-
           {clientLocked ? (
             <Row>
               <Field label="Client">
@@ -707,15 +677,19 @@ function PhotoButton({
       onClick={onClick}
       disabled={disabled}
       style={{
+        width: PHOTO_BTN_WIDTH,
         background: "rgba(255, 255, 255, 0.04)",
         border: `1px solid ${danger ? "rgba(239, 68, 68, 0.3)" : "rgba(255, 255, 255, 0.12)"}`,
         color: danger ? "#ef4444" : "rgba(245, 245, 247, 0.8)",
         borderRadius: 8,
-        padding: "8px 14px",
+        padding: "10px 14px",
         fontSize: 13,
         fontWeight: 500,
         fontFamily: "inherit",
         cursor: disabled ? "not-allowed" : "pointer",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
       }}
     >
       {label}

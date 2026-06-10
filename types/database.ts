@@ -75,7 +75,12 @@ export type Guard = {
   detachment_id: string | null;
   // Standby reliever (migration 0011) — lives in the detachment's Relievers
   // strip, not in the org tree (org_node_id is cleared when this is true).
+  // Kept dual-written from shift_type for transition; not the source of truth.
   is_reliever: boolean;
+  // Shift designation (migration 0012) — drives which detachment tab the guard
+  // appears on. 'reliever' implies is_reliever + no org_node_id. null = shows
+  // only on the All tab.
+  shift_type: "day" | "night" | "reliever" | null;
   // Storage path (bucket-relative) in the private guard-photos bucket, or a
   // legacy http(s) URL. Display goes through a short-lived signed URL.
   photo_url: string | null;

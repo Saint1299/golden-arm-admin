@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import {
   useEffect,
   useMemo,
@@ -11,6 +10,7 @@ import {
 } from "react";
 import {
   DndContext,
+  MeasuringStrategy,
   PointerSensor,
   pointerWithin,
   useDraggable,
@@ -42,7 +42,40 @@ import type { Client, Guard, OrgNode, Shift } from "@/types/database";
 const NODE_PREFIX = "node:";
 const GUARD_PREFIX = "guard:";
 const UNASSIGNED_ID = "unassigned";
+// Droppable shift-tab ids: "shift-tab-day" / "shift-tab-night" / "shift-tab-reliever".
+export const SHIFT_TAB_PREFIX = "shift-tab-";
 const ROOT_PARENT = "__root__";
+
+export type GuardDropResult =
+  | { kind: "shift"; guardId: string; shift: "day" | "night" | "reliever" }
+  | { kind: "assign"; guardId: string; nodeId: string | null }
+  | null;
+
+// Pure routing for a dragged guard chip: given the active draggable id and the
+// droppable it was released on, decide whether this is a shift retag (dropped
+// on a shift tab) or a tree assignment (dropped on a node tile / unassigned).
+export function classifyGuardDrop(
+  activeId: string,
+  overId: string | null,
+): GuardDropResult {
+  if (!activeId.startsWith(GUARD_PREFIX) || !overId) return null;
+  const guardId = activeId.slice(GUARD_PREFIX.length);
+  if (overId.startsWith(SHIFT_TAB_PREFIX)) {
+    return {
+      kind: "shift",
+      guardId,
+      shift: overId.slice(SHIFT_TAB_PREFIX.length) as
+        | "day"
+        | "night"
+        | "reliever",
+    };
+  }
+  if (overId === UNASSIGNED_ID) return { kind: "assign", guardId, nodeId: null };
+  if (overId.startsWith(NODE_PREFIX)) {
+    return { kind: "assign", guardId, nodeId: overId.slice(NODE_PREFIX.length) };
+  }
+  return null;
+}
 
 // Fixed tile box → uniform layout + exact connector anchor points (no DOM
 // measurement needed). Half-and-half tile: full-height photo column on the
@@ -105,6 +138,7 @@ export function OrgChartCanvas({
   photoUrlByGuardId,
   activeShift = "all",
   onGuardsChanged,
+  tabStrip,
 }: {
   detachmentId: string;
   clientId: string;
@@ -117,6 +151,9 @@ export function OrgChartCanvas({
   // Notifies the parent (detachment page) when guard data changed here, so the
   // Relievers strip can re-sync (e.g. a guard toggled to/from reliever).
   onGuardsChanged?: () => void;
+  // The detachment's shift-tab strip, rendered INSIDE this chart's DndContext
+  // so its tabs can act as drop targets for Unassigned guard chips.
+  tabStrip?: ReactNode;
 }) {
   const [nodes, setNodes] = useState<OrgNode[]>(initialNodes);
   const [guards, setGuards] = useState<Guard[]>(initialGuards);
@@ -126,7 +163,8 @@ export function OrgChartCanvas({
   const [busy, setBusy] = useState(false);
   const [editNode, setEditNode] = useState<OrgNode | null>(null);
   const [guardModal, setGuardModal] = useState<{
-    node: OrgNode;
+    // node === null → editing a guard not tied to a tile (an Unassigned chip).
+    node: OrgNode | null;
     guard: Guard | null;
   } | null>(null);
   const [activeDrag, setActiveDrag] = useState<{
@@ -144,25 +182,10 @@ export function OrgChartCanvas({
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
 
-  // Nodes visible under the active shift. A node is hidden if its own shift
-  // is the opposite of the active shift, OR any ancestor is hidden (so an
-  // excluded node takes its whole subtree with it). null/any nodes always show.
-  const visibleNodes = useMemo(() => {
-    if (activeShift === "all") return nodes;
-    const byId = new Map(nodes.map((n) => [n.id, n]));
-    const cache = new Map<string, boolean>();
-    function visible(n: OrgNode): boolean {
-      const c = cache.get(n.id);
-      if (c !== undefined) return c;
-      let ok = n.shift === null || n.shift === activeShift;
-      if (ok && n.parent_node_id && byId.has(n.parent_node_id)) {
-        ok = visible(byId.get(n.parent_node_id)!);
-      }
-      cache.set(n.id, ok);
-      return ok;
-    }
-    return nodes.filter(visible);
-  }, [nodes, activeShift]);
+  // The full structure renders on every tab — the shift tabs differ only in
+  // which guard shows inside each tile (see guardsByNode). So layout and
+  // connectors are identical across All/Day/Night.
+  const visibleNodes = nodes;
 
   const autoPositions = useMemo(
     () => computeAutoPositions(visibleNodes),
@@ -176,23 +199,34 @@ export function OrgChartCanvas({
     return autoPositions.get(node.id) ?? { x: PAD, y: PAD };
   }
 
+  // Guard shown inside each tile. On a shift tab, a tile only shows its
+  // assigned guard if that guard's shift_type matches — otherwise the tile
+  // renders empty (a "Drop a guard here" drop target) even though the position
+  // still exists. The All tab shows every assigned guard.
   const guardsByNode = useMemo(() => {
     const m = new Map<string, Guard[]>();
     for (const g of guards) {
       if (!g.org_node_id) continue;
+      if (activeShift !== "all" && g.shift_type !== activeShift) continue;
       const list = m.get(g.org_node_id) ?? [];
       list.push(g);
       m.set(g.org_node_id, list);
     }
     return m;
-  }, [guards]);
+  }, [guards, activeShift]);
 
-  // Unassigned = not in the tree AND not a reliever (relievers have their own
-  // strip on the detachment page — three mutually exclusive buckets).
-  const unassignedGuards = useMemo(
-    () => guards.filter((g) => !g.org_node_id && !g.is_reliever),
-    [guards],
-  );
+  // Unassigned strip, filtered per active tab:
+  //  - All: every guard not in the tree and not a reliever.
+  //  - Day/Night: only that shift's guards still waiting for a tree position.
+  // (The chart isn't rendered on the Reliever tab, so no case for it here.)
+  const unassignedGuards = useMemo(() => {
+    if (activeShift === "all") {
+      return guards.filter((g) => !g.org_node_id && !g.is_reliever);
+    }
+    return guards.filter(
+      (g) => !g.org_node_id && g.shift_type === activeShift,
+    );
+  }, [guards, activeShift]);
 
   // Connector segments (parent bottom-center → child top-center), routed via
   // an orthogonal elbow. Works regardless of whether either endpoint is auto
@@ -267,52 +301,41 @@ export function OrgChartCanvas({
     onGuardsChanged?.();
   }
 
-  // New detachments seed a Commander (any shift) with a Day and a Night
-  // Shift In-Charge beneath it. Senior/Guard rows are left for the user.
+  // New detachments seed a simple linear chain. Positions no longer carry a
+  // shift (that moved to guards.shift_type), so org_nodes.shift stays null.
   async function seedDefaultChain() {
     setSeeding(true);
     const supabase = createSupabaseClient();
-    const { data: commander, error: cmdErr } = await supabase
-      .from("org_nodes")
-      .insert({
-        detachment_id: detachmentId,
-        client_id: null,
-        parent_node_id: null,
-        label: "Detachment Commander",
-        level: 0,
-        sort_order: 0,
-        is_detached: false,
-        pos_x: null,
-        pos_y: null,
-        shift: null,
-      })
-      .select("id")
-      .single();
-    if (cmdErr || !commander) {
-      showToast(cmdErr?.message ?? "Failed to set up org chart", "error");
-      await refetch();
-      setSeeding(false);
-      return;
-    }
-    const branch: Array<{ label: string; shift: Shift; sort: number }> = [
-      { label: "Day Shift In-Charge", shift: "day", sort: 0 },
-      { label: "Night Shift In-Charge", shift: "night", sort: 1 },
+    const chain = [
+      "Detachment Commander",
+      "Shift In-Charge",
+      "Senior Guard",
+      "Guard",
     ];
-    const { error: branchErr } = await supabase.from("org_nodes").insert(
-      branch.map((b) => ({
-        detachment_id: detachmentId,
-        client_id: null,
-        parent_node_id: commander.id as string,
-        label: b.label,
-        level: 1,
-        sort_order: b.sort,
-        is_detached: false,
-        pos_x: null,
-        pos_y: null,
-        shift: b.shift,
-      })),
-    );
-    if (branchErr) showToast(branchErr.message, "error");
+    let parentId: string | null = null;
+    for (let level = 0; level < chain.length; level++) {
+      const { data, error } = await supabase
+        .from("org_nodes")
+        .insert({
+          detachment_id: detachmentId,
+          client_id: null,
+          parent_node_id: parentId,
+          label: chain[level],
+          level,
+          sort_order: 0,
+          is_detached: false,
+          pos_x: null,
+          pos_y: null,
+          shift: null,
+        })
+        .select("id")
+        .single();
+      if (error || !data) {
+        showToast(error?.message ?? "Failed to set up org chart", "error");
+        break;
+      }
+      parentId = data.id as string;
+    }
     await refetch();
     setSeeding(false);
   }
@@ -460,22 +483,6 @@ export function OrgChartCanvas({
     await refetch();
   }
 
-  async function handleSetShift(node: OrgNode, shift: Shift | null) {
-    // Optimistically reflect in the open editor; the modal stays open.
-    setEditNode((prev) =>
-      prev && prev.id === node.id ? { ...prev, shift } : prev,
-    );
-    const supabase = createSupabaseClient();
-    const { error } = await supabase
-      .from("org_nodes")
-      .update({ shift })
-      .eq("id", node.id);
-    if (error) {
-      showToast(error.message, "error");
-    }
-    await refetch();
-  }
-
   async function handleUnassignGuard(guard: Guard) {
     setBusy(true);
     const supabase = createSupabaseClient();
@@ -573,6 +580,46 @@ export function OrgChartCanvas({
     await refetch();
   }
 
+  // Dropping a guard chip on a shift tab retags its shift in one motion.
+  // Reliever also clears the tree position (matching the form); day/night keep
+  // it. Updates by guardId directly — no dependency on finding the guard in a
+  // possibly-stale local closure (that previously caused a silent early return).
+  async function handleGuardShiftDrop(
+    guardId: string,
+    shift: "day" | "night" | "reliever",
+  ) {
+    setBusy(true);
+    try {
+      const supabase = createSupabaseClient();
+      const update =
+        shift === "reliever"
+          ? { shift_type: "reliever", is_reliever: true, org_node_id: null }
+          : { shift_type: shift, is_reliever: false };
+      const { error } = await supabase
+        .from("guards")
+        .update(update)
+        .eq("id", guardId);
+      if (error) {
+        console.error("[DnD] supabase error", error);
+        showToast(error.message, "error");
+        return;
+      }
+      showToast(
+        shift === "reliever" ? "Updated to reliever" : `Updated to ${shift} shift`,
+        "success",
+      );
+      await refetch();
+    } catch (e) {
+      console.error("[DnD] handleGuardShiftDrop threw", e);
+      showToast(
+        e instanceof Error ? e.message : "Failed to update shift",
+        "error",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // ---- DnD ----------------------------------------------------------------
 
   function onDragStart(event: DragStartEvent) {
@@ -614,15 +661,15 @@ export function OrgChartCanvas({
     }
 
     if (activeId.startsWith(GUARD_PREFIX)) {
-      if (!over) return;
-      const overId = String(over.id);
-      const guardId = activeId.slice(GUARD_PREFIX.length);
-      let newNodeId: string | null = null;
-      if (overId === UNASSIGNED_ID) newNodeId = null;
-      else if (overId.startsWith(NODE_PREFIX))
-        newNodeId = overId.slice(NODE_PREFIX.length);
-      else return;
-      await handleGuardAssign(guardId, newNodeId);
+      const result = classifyGuardDrop(activeId, over ? String(over.id) : null);
+      if (!result) return;
+      if (result.kind === "shift") {
+        // Dropped on a shift tab → retag shift (reliever clears the tree
+        // position inside the handler; day/night keep it).
+        await handleGuardShiftDrop(result.guardId, result.shift);
+      } else {
+        await handleGuardAssign(result.guardId, result.nodeId);
+      }
     }
   }
 
@@ -631,10 +678,19 @@ export function OrgChartCanvas({
     setEditNode(node);
   }
 
+  // Click (not drag) on an Unassigned chip → edit that guard so the user can
+  // pick its shift_type. suppressClick ensures a drag never opens this.
+  function openGuardEditor(guard: Guard) {
+    if (suppressClick.current) return;
+    setGuardModal({ node: null, guard });
+  }
+
   // ---- Render -------------------------------------------------------------
 
+  // Use the actual assigned guard (not the shift-filtered view) so the editor
+  // can manage a guard even on a shift tab where its tile renders empty.
   const editNodeGuard = editNode
-    ? guardsByNode.get(editNode.id)?.[0] ?? null
+    ? guards.find((g) => g.org_node_id === editNode.id) ?? null
     : null;
   const parentCandidates = editNode
     ? nodes.filter(
@@ -645,26 +701,38 @@ export function OrgChartCanvas({
 
   return (
     <div>
-      <p
-        style={{
-          marginTop: 0,
-          marginBottom: 16,
-          fontSize: 13,
-          color: "rgba(245, 245, 247, 0.55)",
-        }}
-      >
-        Click a tile to edit the position or its guard. Drag a tile to place it
-        anywhere — connector lines follow. Use the tile editor’s “Change parent”
-        to re-wire the hierarchy, or “Reset to auto layout” to snap it back.
-        Drag a guard from the Unassigned strip onto a tile to assign.
-      </p>
       <DndContext
         sensors={sensors}
         collisionDetection={pointerWithin}
+        // Re-measure droppables continuously. The shift-tab drop targets (and
+        // the canvas tiles) can be stale at drop time if the scrollable canvas
+        // has scrolled — measuring once at drag-start (the default) caused the
+        // drop's `over` to be null even though the tab highlighted on hover.
+        measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
         onDragStart={onDragStart}
         onDragEnd={onDragEnd}
       >
-        <UnassignedStrip guards={unassignedGuards} photoUrls={photoUrls} />
+        {/* Tab strip lives inside the DndContext so its tabs can be drop
+            targets for Unassigned guard chips. */}
+        {tabStrip}
+        <p
+          style={{
+            marginTop: 0,
+            marginBottom: 16,
+            fontSize: 13,
+            color: "rgba(245, 245, 247, 0.55)",
+          }}
+        >
+          Click a tile to edit the position or its guard. Drag a tile to place
+          it anywhere — connector lines follow. Drag a guard chip onto a tile to
+          assign, or onto a shift tab to change its shift.
+        </p>
+        <UnassignedStrip
+          guards={unassignedGuards}
+          photoUrls={photoUrls}
+          activeShift={activeShift}
+          onGuardClick={openGuardEditor}
+        />
 
         <div style={{ height: 16 }} />
 
@@ -688,10 +756,11 @@ export function OrgChartCanvas({
               }}
               disabled={busy}
             />
-          ) : activeShift === "all" ? (
-            // All tab → zoom + pan. cmd/ctrl-wheel zooms; plain wheel scrolls;
-            // drag empty canvas pans; tiles are excluded so their dnd-kit drag
-            // (reposition) and click (edit) keep working.
+          ) : (
+            // All / Day / Night → zoom + pan. cmd/ctrl-wheel zooms; plain wheel
+            // scrolls; drag empty canvas pans; tiles are excluded so their
+            // dnd-kit drag (reposition) and click (edit) keep working. (The
+            // Reliever tab renders its own view in the page, not this chart.)
             <ZoomPanCanvas>
               <ChartInner
                 bounds={bounds}
@@ -703,19 +772,6 @@ export function OrgChartCanvas({
                 onOpen={openEditor}
               />
             </ZoomPanCanvas>
-          ) : (
-            // Shift tabs → simple scroll, no zoom.
-            <div style={{ overflow: "auto", maxHeight: "75vh" }}>
-              <ChartInner
-                bounds={bounds}
-                connectors={connectors}
-                visibleNodes={visibleNodes}
-                renderPos={renderPos}
-                guardsByNode={guardsByNode}
-                photoUrls={photoUrls}
-                onOpen={openEditor}
-              />
-            </div>
           )}
         </GlassCard>
 
@@ -738,7 +794,6 @@ export function OrgChartCanvas({
           onAddChild={(label) => handleAddChild(editNode, label)}
           onAddSibling={(label) => handleAddSibling(editNode, label)}
           onChangeParent={(pid) => handleChangeParent(editNode.id, pid)}
-          onSetShift={(shift) => handleSetShift(editNode, shift)}
           onResetLayout={() => handleResetLayout(editNode)}
           onDelete={() => handleDelete(editNode)}
           onEditGuard={(g) => {
@@ -760,7 +815,7 @@ export function OrgChartCanvas({
         <GuardFormModal
           clientId={clientId}
           detachmentId={detachmentId}
-          orgNodeId={guardModal.node.id}
+          orgNodeId={guardModal.node?.id ?? null}
           lockAssignment={guardModal.guard === null}
           initialGuard={guardModal.guard}
           clients={clients}
@@ -836,7 +891,7 @@ function ChartInner({
   );
 }
 
-// Zoom/pan wrapper used only on the All tab.
+// Zoom/pan wrapper used on the All / Day / Night chart tabs.
 function ZoomPanCanvas({ children }: { children: ReactNode }) {
   const [pct, setPct] = useState(100);
   return (
@@ -1045,11 +1100,21 @@ function DragPreview({
 function UnassignedStrip({
   guards,
   photoUrls,
+  activeShift,
+  onGuardClick,
 }: {
   guards: Guard[];
   photoUrls: Record<string, string>;
+  activeShift: Shift | "all";
+  onGuardClick: (g: Guard) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: UNASSIGNED_ID });
+  const emptyText =
+    activeShift === "day"
+      ? "No unassigned day-shift guards."
+      : activeShift === "night"
+        ? "No unassigned night-shift guards."
+        : "All guards are assigned.";
   return (
     <GlassCard
       style={{
@@ -1086,11 +1151,16 @@ function UnassignedStrip({
         </span>
         {guards.length === 0 ? (
           <span style={{ fontSize: 12, color: "rgba(245, 245, 247, 0.4)" }}>
-            {isOver ? "Drop here to unassign" : "All guards are assigned."}
+            {isOver ? "Drop here to unassign" : emptyText}
           </span>
         ) : (
           guards.map((g) => (
-            <GuardChip key={g.id} guard={g} photoUrl={photoUrls[g.id] ?? null} />
+            <GuardChip
+              key={g.id}
+              guard={g}
+              photoUrl={photoUrls[g.id] ?? null}
+              onOpen={() => onGuardClick(g)}
+            />
           ))
         )}
       </div>
@@ -1373,11 +1443,12 @@ function EmptyPhoto() {
 function GuardChip({
   guard,
   photoUrl,
+  onOpen,
 }: {
   guard: Guard;
   photoUrl: string | null;
+  onOpen: () => void;
 }) {
-  const router = useRouter();
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `${GUARD_PREFIX}${guard.id}`,
   });
@@ -1386,8 +1457,8 @@ function GuardChip({
       ref={setNodeRef}
       {...attributes}
       {...listeners}
-      onClick={() => router.push(`/hierarchy/guards/${guard.id}`)}
-      title={`${guard.full_name} — drag to assign, click to open`}
+      onClick={onOpen}
+      title={`${guard.full_name} — drag to assign, click to edit`}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -1434,7 +1505,6 @@ function NodeEditModal({
   onAddChild,
   onAddSibling,
   onChangeParent,
-  onSetShift,
   onResetLayout,
   onDelete,
   onEditGuard,
@@ -1452,7 +1522,6 @@ function NodeEditModal({
   onAddChild: (label: string) => void;
   onAddSibling: (label: string) => void;
   onChangeParent: (parentId: string | null) => void;
-  onSetShift: (shift: Shift | null) => void;
   onResetLayout: () => void;
   onDelete: () => void;
   onEditGuard: (g: Guard) => void;
@@ -1490,23 +1559,6 @@ function NodeEditModal({
         </div>
       </Field>
 
-      <Field
-        label="Shift"
-        htmlFor="node-shift"
-        helper="Which shift tab this position appears on. Any shift shows on all tabs."
-      >
-        <SelectInput
-          id="node-shift"
-          value={node.shift ?? ""}
-          onChange={(v) => onSetShift(v === "" ? null : (v as Shift))}
-          options={[
-            { value: "", label: "Any shift" },
-            { value: "day", label: "Day shift" },
-            { value: "night", label: "Night shift" },
-          ]}
-          disabled={busy}
-        />
-      </Field>
 
       <Field
         label="Add a position"

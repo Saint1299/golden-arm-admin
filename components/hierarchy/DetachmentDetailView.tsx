@@ -1,5 +1,6 @@
 "use client";
 
+import { useDroppable } from "@dnd-kit/core";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
@@ -14,7 +15,7 @@ import { DetachmentFormModal } from "./DetachmentFormModal";
 import { ExpiringLicensesBanner, type ExpiringRow } from "./ExpiringLicensesBanner";
 import { GuardAvatar, GuardPhotoBlock } from "./GuardCard";
 import { GuardFormModal } from "./GuardFormModal";
-import { OrgChartCanvas } from "./OrgChartCanvas";
+import { OrgChartCanvas, SHIFT_TAB_PREFIX } from "./OrgChartCanvas";
 import { BackButton } from "@/components/ui/BackButton";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { useToast } from "@/components/ui/Toast";
@@ -28,6 +29,8 @@ import type {
   OrgNode,
   Shift,
 } from "@/types/database";
+
+type TabKey = Shift | "all" | "reliever";
 
 const secondaryButtonStyle: CSSProperties = {
   background: "rgba(255, 255, 255, 0.04)",
@@ -89,10 +92,12 @@ export function DetachmentDetailView({
   }>({ open: false, editing: null });
 
   const shiftParam = searchParams.get("shift");
-  const activeShift: Shift | "all" =
-    shiftParam === "day" || shiftParam === "night" ? shiftParam : "all";
+  const activeTab: TabKey =
+    shiftParam === "day" || shiftParam === "night" || shiftParam === "reliever"
+      ? shiftParam
+      : "all";
 
-  function setShiftTab(next: Shift | "all") {
+  function setTab(next: TabKey) {
     const params = new URLSearchParams(searchParams.toString());
     if (next === "all") params.delete("shift");
     else params.set("shift", next);
@@ -131,6 +136,18 @@ export function DetachmentDetailView({
 
   const relievers = useMemo(
     () => guards.filter((g) => g.is_reliever),
+    [guards],
+  );
+
+  // Tab count badges. "All" counts every guard in the detachment (incl.
+  // relievers); the shift tabs count by shift_type.
+  const tabCounts = useMemo(
+    () => ({
+      all: guards.length,
+      day: guards.filter((g) => g.shift_type === "day").length,
+      night: guards.filter((g) => g.shift_type === "night").length,
+      reliever: guards.filter((g) => g.shift_type === "reliever").length,
+    }),
     [guards],
   );
 
@@ -286,30 +303,41 @@ export function DetachmentDetailView({
           onEditGuard={(g) => setGuardModal({ open: true, editing: g })}
           onReplaceGuard={handleReplaceGuard}
         />
-      ) : (
+      ) : activeTab === "reliever" ? (
         <>
-          <ShiftTabs active={activeShift} onChange={setShiftTab} />
-          <OrgChartCanvas
-            detachmentId={detachment.id}
-            clientId={client.id}
-            clients={clients}
-            initialNodes={initialNodes}
-            initialGuards={initialGuards}
-            photoUrlByGuardId={photoUrlByGuardId}
-            activeShift={activeShift}
-            onGuardsChanged={refetch}
+          {/* Reliever tab has no chart/DndContext, so its tabs aren't drop
+              targets (there are no chips to drag here anyway). */}
+          <ShiftTabs active={activeTab} onChange={setTab} counts={tabCounts} />
+          <RelieverTab
+            relievers={relievers}
+            photoUrls={photoUrls}
+            onAddReliever={() =>
+              setGuardModal({ open: true, editing: null, reliever: true })
+            }
           />
         </>
+      ) : (
+        // The tab strip is rendered INSIDE the chart's DndContext (via tabStrip)
+        // so its tabs can receive dragged Unassigned chips.
+        <OrgChartCanvas
+          detachmentId={detachment.id}
+          clientId={client.id}
+          clients={clients}
+          initialNodes={initialNodes}
+          initialGuards={initialGuards}
+          photoUrlByGuardId={photoUrlByGuardId}
+          activeShift={activeTab}
+          onGuardsChanged={refetch}
+          tabStrip={
+            <ShiftTabs
+              active={activeTab}
+              onChange={setTab}
+              counts={tabCounts}
+              droppable
+            />
+          }
+        />
       )}
-
-      <div style={{ height: 32 }} />
-      <RelieverStrip
-        relievers={relievers}
-        photoUrls={photoUrls}
-        onAddReliever={() =>
-          setGuardModal({ open: true, editing: null, reliever: true })
-        }
-      />
 
       {bulkOpen ? (
         <BulkImportModal
@@ -356,14 +384,21 @@ export function DetachmentDetailView({
 function ShiftTabs({
   active,
   onChange,
+  counts,
+  droppable = false,
 }: {
-  active: Shift | "all";
-  onChange: (s: Shift | "all") => void;
+  active: TabKey;
+  onChange: (s: TabKey) => void;
+  counts: Record<TabKey, number>;
+  // When true (chart tabs, inside the chart's DndContext), the day/night/
+  // reliever tabs accept dragged guard chips.
+  droppable?: boolean;
 }) {
-  const tabs: Array<{ key: Shift | "all"; label: string }> = [
+  const tabs: Array<{ key: TabKey; label: string }> = [
     { key: "all", label: "All" },
     { key: "day", label: "Day shift" },
     { key: "night", label: "Night shift" },
+    { key: "reliever", label: "Reliever" },
   ];
   return (
     <div
@@ -374,49 +409,92 @@ function ShiftTabs({
         borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
       }}
     >
-      {tabs.map((tab) => {
-        const isActive = tab.key === active;
-        return (
-          <button
-            key={tab.key}
-            type="button"
-            onClick={() => onChange(tab.key)}
-            style={{
-              position: "relative",
-              background: "transparent",
-              border: "none",
-              padding: "10px 16px",
-              fontSize: 14,
-              fontWeight: 500,
-              fontFamily: "inherit",
-              cursor: "pointer",
-              color: isActive ? "#f5f5f7" : "rgba(245, 245, 247, 0.5)",
-              transition: "color 200ms ease-out",
-            }}
-          >
-            {tab.label}
-            {isActive ? (
-              <span
-                aria-hidden
-                style={{
-                  position: "absolute",
-                  left: 12,
-                  right: 12,
-                  bottom: -1,
-                  height: 2,
-                  backgroundColor: "#c9a961",
-                  borderRadius: "2px 2px 0 0",
-                }}
-              />
-            ) : null}
-          </button>
-        );
-      })}
+      {tabs.map((tab) => (
+        <TabButton
+          key={tab.key}
+          tabKey={tab.key}
+          label={tab.label}
+          count={counts[tab.key]}
+          isActive={tab.key === active}
+          // "All" is never a drop target.
+          droppable={droppable && tab.key !== "all"}
+          onClick={() => onChange(tab.key)}
+        />
+      ))}
     </div>
   );
 }
 
-function RelieverStrip({
+function TabButton({
+  tabKey,
+  label,
+  count,
+  isActive,
+  droppable,
+  onClick,
+}: {
+  tabKey: TabKey;
+  label: string;
+  count: number;
+  isActive: boolean;
+  droppable: boolean;
+  onClick: () => void;
+}) {
+  // Always call the hook (rules-of-hooks); disabled when not a drop target.
+  const { setNodeRef, isOver } = useDroppable({
+    id: `${SHIFT_TAB_PREFIX}${tabKey}`,
+    disabled: !droppable,
+  });
+  const highlight = droppable && isOver;
+  return (
+    <button
+      ref={setNodeRef}
+      type="button"
+      onClick={onClick}
+      style={{
+        position: "relative",
+        background: highlight ? "rgba(201, 169, 97, 0.14)" : "transparent",
+        border: "1px solid",
+        borderColor: highlight ? "rgba(201, 169, 97, 0.55)" : "transparent",
+        borderRadius: highlight ? "8px 8px 0 0" : 0,
+        padding: "10px 16px",
+        fontSize: 14,
+        fontWeight: 500,
+        fontFamily: "inherit",
+        cursor: "pointer",
+        color: isActive || highlight ? "#f5f5f7" : "rgba(245, 245, 247, 0.5)",
+        transition: "color 200ms ease-out, background-color 150ms ease-out, border-color 150ms ease-out",
+      }}
+    >
+      {label}{" "}
+      <span
+        style={{
+          color: isActive
+            ? "rgba(245, 245, 247, 0.55)"
+            : "rgba(245, 245, 247, 0.35)",
+        }}
+      >
+        ({count})
+      </span>
+      {isActive ? (
+        <span
+          aria-hidden
+          style={{
+            position: "absolute",
+            left: 12,
+            right: 12,
+            bottom: -1,
+            height: 2,
+            backgroundColor: "#c9a961",
+            borderRadius: "2px 2px 0 0",
+          }}
+        />
+      ) : null}
+    </button>
+  );
+}
+
+function RelieverTab({
   relievers,
   photoUrls,
   onAddReliever,
@@ -475,7 +553,7 @@ function RelieverStrip({
               alignItems: "center",
               justifyContent: "center",
               gap: 12,
-              padding: "24px 16px",
+              padding: "32px 16px",
               fontSize: 13,
               color: "rgba(245, 245, 247, 0.5)",
             }}
@@ -484,14 +562,7 @@ function RelieverStrip({
           </div>
         </GlassCard>
       ) : (
-        <div
-          style={{
-            display: "flex",
-            gap: 12,
-            overflowX: "auto",
-            paddingBottom: 6,
-          }}
-        >
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
           {relievers.map((g) => (
             <RelieverCard
               key={g.id}
