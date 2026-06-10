@@ -21,15 +21,10 @@ export default async function ClientDetailRoute({
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const { data: client, error: clientErr } = await supabase
-    .from("clients")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle();
-
-  if (clientErr || !client) notFound();
-
-  const [guardsRes, detsRes] = await Promise.all([
+  // Independent of each other (all key off the URL `id`), so run in parallel
+  // and validate the client row afterward.
+  const [clientRes, guardsRes, detsRes] = await Promise.all([
+    supabase.from("clients").select("*").eq("id", id).maybeSingle(),
     supabase
       .from("guards")
       .select("*")
@@ -41,6 +36,9 @@ export default async function ClientDetailRoute({
       .eq("client_id", id)
       .order("name", { ascending: true }),
   ]);
+
+  const { data: client, error: clientErr } = clientRes;
+  if (clientErr || !client) notFound();
 
   return (
     <ClientDetailView

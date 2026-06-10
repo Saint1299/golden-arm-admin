@@ -22,32 +22,30 @@ export default async function DetachmentDetailRoute({
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const { data: detachment, error: detErr } = await supabase
-    .from("detachments")
-    .select("*")
-    .eq("id", did)
-    .maybeSingle();
+  // All five queries key off the URL params (id / did), none depends on
+  // another's result, so run them in parallel and validate afterward.
+  const [detRes, clientRes, allClientsRes, guardsRes, nodesRes] =
+    await Promise.all([
+      supabase.from("detachments").select("*").eq("id", did).maybeSingle(),
+      supabase.from("clients").select("*").eq("id", id).maybeSingle(),
+      supabase.from("clients").select("*").order("name", { ascending: true }),
+      supabase
+        .from("guards")
+        .select("*")
+        .eq("detachment_id", did)
+        .order("full_name", { ascending: true }),
+      supabase
+        .from("org_nodes")
+        .select("*")
+        .eq("detachment_id", did)
+        .order("sort_order", { ascending: true }),
+    ]);
 
+  const detachment = detRes.data;
   // Guard against a detachment id that doesn't belong to the client in the URL.
-  if (detErr || !detachment || (detachment as Detachment).client_id !== id) {
+  if (detRes.error || !detachment || (detachment as Detachment).client_id !== id) {
     notFound();
   }
-
-  const [clientRes, allClientsRes, guardsRes, nodesRes] = await Promise.all([
-    supabase.from("clients").select("*").eq("id", id).maybeSingle(),
-    supabase.from("clients").select("*").order("name", { ascending: true }),
-    supabase
-      .from("guards")
-      .select("*")
-      .eq("detachment_id", did)
-      .order("full_name", { ascending: true }),
-    supabase
-      .from("org_nodes")
-      .select("*")
-      .eq("detachment_id", did)
-      .order("sort_order", { ascending: true }),
-  ]);
-
   if (!clientRes.data) notFound();
 
   const guards = (guardsRes.data ?? []) as Guard[];
