@@ -4,6 +4,29 @@ type SupabaseBrowserClient = ReturnType<typeof createClient>;
 
 export const COMPLIANCE_BUCKET = "compliance-documents";
 
+// Mirrors the bucket's file_size_limit (10MB, set in migration 0013). Checked
+// client-side so an oversized file fails instantly instead of after a slow
+// upload that the server would reject anyway.
+export const MAX_COMPLIANCE_FILE_BYTES = 10 * 1024 * 1024;
+
+// Map raw Supabase storage errors to messages staff can act on. Supabase
+// surfaces these as plain strings in error.message; we match on substrings so
+// wording changes upstream don't silently break the mapping (the default
+// branch falls back to the original message).
+export function friendlyUploadError(message: string): string {
+  const m = message.toLowerCase();
+  if (m.includes("bucket not found")) {
+    return "Storage isn’t configured. Please contact your administrator.";
+  }
+  if (m.includes("payload too large") || m.includes("exceeded the maximum")) {
+    return "File is too large. Max size: 10MB.";
+  }
+  if (m.includes("jwt") && m.includes("expired")) {
+    return "Your session expired. Please log in again.";
+  }
+  return message;
+}
+
 // 5-minute TTL. Long enough for a user to open the new tab and start the
 // download even on slow connections, short enough that a leaked URL isn't a
 // durable problem. Bump this only if you have a real reason — RLS already

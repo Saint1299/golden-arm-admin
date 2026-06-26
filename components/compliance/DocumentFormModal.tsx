@@ -22,7 +22,9 @@ import { useToast } from "@/components/ui/Toast";
 import {
   deleteComplianceFile,
   displayNameFromFileUrl,
+  friendlyUploadError,
   isHttpUrl,
+  MAX_COMPLIANCE_FILE_BYTES,
   openComplianceFile,
   uploadComplianceFile,
 } from "@/lib/compliance-storage";
@@ -130,6 +132,9 @@ export function DocumentFormModal({
   }
 
   const [saving, setSaving] = useState(false);
+  // Distinct from `saving`: true only while the storage upload is in flight, so
+  // the submit button can show upload-specific progress on slow connections.
+  const [uploading, setUploading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const { showToast } = useToast();
 
@@ -188,6 +193,14 @@ export function DocumentFormModal({
       setErrorMessage("Client name is required for client-scoped documents.");
       return;
     }
+    // Pre-flight size check — fail instantly instead of after a slow upload the
+    // bucket's 10MB limit would reject anyway.
+    if (stagedFile && stagedFile.size > MAX_COMPLIANCE_FILE_BYTES) {
+      setErrorMessage(
+        `File is too large. Max size: 10MB. Yours: ${fileSizeDisplay(stagedFile)}.`,
+      );
+      return;
+    }
 
     setSaving(true);
     setErrorMessage(null);
@@ -201,10 +214,13 @@ export function DocumentFormModal({
     let resolvedFileUrl: string | null = existingFileUrl;
 
     if (stagedFile) {
+      setUploading(true);
       const upload = await uploadComplianceFile(supabase, scope, stagedFile);
+      setUploading(false);
       if (upload.error || !upload.path) {
-        setErrorMessage(upload.error ?? "Upload failed");
-        showToast(upload.error ?? "Upload failed", "error");
+        const friendly = friendlyUploadError(upload.error ?? "Upload failed");
+        setErrorMessage(friendly);
+        showToast(friendly, "error");
         setSaving(false);
         return;
       }
@@ -274,7 +290,13 @@ export function DocumentFormModal({
       <FormError message={errorMessage} />
       {errorMessage ? <div style={{ height: 12 }} /> : null}
       <GoldButton type="submit" form={DOC_FORM_ID} disabled={saving}>
-        {saving ? "Saving…" : isEditing ? "Save document" : "Add document"}
+        {uploading && stagedFile
+          ? `Uploading ${fileSizeDisplay(stagedFile)}…`
+          : saving
+            ? "Saving…"
+            : isEditing
+              ? "Save document"
+              : "Add document"}
       </GoldButton>
       <div style={{ height: 8 }} />
       <div style={{ display: "flex", justifyContent: "center" }}>
@@ -446,7 +468,7 @@ export function DocumentFormModal({
 
         <Field
           label="File"
-          helper="Uploads go to the compliance-documents bucket; older docs may show a manually-pasted link."
+          helper="Max file size: 10MB. Accepts JPG, PNG, HEIC, or PDF."
         >
           <FileUploadField
             existingFileUrl={existingFileUrl}
@@ -548,6 +570,7 @@ function FileUploadField({
       <input
         ref={inputRef}
         type="file"
+        accept="image/jpeg,image/png,image/webp,image/heic,application/pdf"
         onChange={(e) => onSelect(e.target.files?.[0] ?? null)}
         disabled={disabled}
         style={{ display: "none" }}
