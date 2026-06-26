@@ -448,6 +448,160 @@ export function OrgChartCanvas({
     await refetch();
   }
 
+  // ---- Quick tile affordances (hover buttons) -----------------------------
+  // These mirror the modal's add/sibling/delete but skip the dialog for speed.
+  // The modal paths stay as alternates.
+
+  // Add a child directly under the tile. Reuses insertNode (shift inherits from
+  // the parent = this tile, sort_order appends at end). No modal afterwards.
+  async function handleQuickAddChild(node: OrgNode) {
+    if (busy) return;
+    await insertNode("New position", node);
+  }
+
+  // Add a peer under the same parent (root → another root). Unlike the modal's
+  // append-at-end, this slots the new position immediately AFTER the current
+  // tile (sort_order + 1) and bumps any later siblings to make room.
+  async function handleQuickAddSibling(node: OrgNode) {
+    if (busy) return;
+    setBusy(true);
+    const supabase = createSupabaseClient();
+    const parentId = node.parent_node_id ?? null;
+    const newSort = node.sort_order + 1;
+    const toBump = nodes.filter(
+      (n) =>
+        (n.parent_node_id ?? null) === parentId &&
+        n.id !== node.id &&
+        n.sort_order >= newSort,
+    );
+    const bumpResults = await Promise.all(
+      toBump.map((s) =>
+        supabase
+          .from("org_nodes")
+          .update({ sort_order: s.sort_order + 1 })
+          .eq("id", s.id),
+      ),
+    );
+    const bumpErr = bumpResults.find((r) => r.error);
+    if (bumpErr?.error) {
+      setBusy(false);
+      showToast(bumpErr.error.message, "error");
+      await refetch();
+      return;
+    }
+    const { error } = await supabase.from("org_nodes").insert({
+      detachment_id: detachmentId,
+      client_id: null,
+      parent_node_id: parentId,
+      label: "New position",
+      level: node.level,
+      sort_order: newSort,
+      is_detached: false,
+      pos_x: null,
+      pos_y: null,
+      // Inherit the current tile's shift (positions usually carry null).
+      shift: node.shift,
+    });
+    setBusy(false);
+    if (error) {
+      showToast(error.message, "error");
+      await refetch();
+      return;
+    }
+    showToast("Position added", "success");
+    await refetch();
+  }
+
+  // Delete just this position, preserving the branch below it: the tile's own
+  // guard is unassigned, and its direct children are promoted to take its place
+  // under the grandparent (parent_node_id rewritten, level shifted up by one for
+  // each promoted subtree). This differs from the modal's delete, which cascades
+  // the whole branch. parent_node_id is ON DELETE CASCADE, so children MUST be
+  // reparented before the row is removed.
+  async function handleQuickDelete(node: OrgNode) {
+    if (busy) return;
+    const ok = window.confirm(
+      "Delete this position? Any assigned guard will become unassigned. This cannot be undone.",
+    );
+    if (!ok) return;
+    setBusy(true);
+    const supabase = createSupabaseClient();
+
+    // 1. Unassign any guard sitting directly on this position.
+    const { error: unassignErr } = await supabase
+      .from("guards")
+      .update({ org_node_id: null })
+      .eq("org_node_id", node.id);
+    if (unassignErr) {
+      setBusy(false);
+      showToast(unassignErr.message, "error");
+      return;
+    }
+
+    // 2. Promote direct children to the grandparent, appended after its
+    //    existing children. Each promoted subtree shifts up one level.
+    const grandparentId = node.parent_node_id ?? null;
+    const children = nodes
+      .filter((n) => n.parent_node_id === node.id)
+      .sort(sortSiblings);
+    if (children.length > 0) {
+      const siblingOrders = nodes
+        .filter(
+          (n) => (n.parent_node_id ?? null) === grandparentId && n.id !== node.id,
+        )
+        .map((n) => n.sort_order);
+      let nextSort = siblingOrders.length ? Math.max(...siblingOrders) + 1 : 0;
+      const updates: Array<PromiseLike<{ error: { message: string } | null }>> =
+        [];
+      for (const child of children) {
+        updates.push(
+          supabase
+            .from("org_nodes")
+            .update({
+              parent_node_id: grandparentId,
+              sort_order: nextSort++,
+              level: Math.max(0, child.level - 1),
+            })
+            .eq("id", child.id),
+        );
+        for (const descId of descendantIds(child.id).filter(
+          (d) => d !== child.id,
+        )) {
+          const dn = nodes.find((n) => n.id === descId);
+          if (!dn) continue;
+          updates.push(
+            supabase
+              .from("org_nodes")
+              .update({ level: Math.max(0, dn.level - 1) })
+              .eq("id", descId),
+          );
+        }
+      }
+      const results = await Promise.all(updates);
+      const promoteErr = results.find((r) => r.error);
+      if (promoteErr?.error) {
+        setBusy(false);
+        showToast(promoteErr.error.message, "error");
+        await refetch();
+        return;
+      }
+    }
+
+    // 3. Remove the now-childless position.
+    const { error } = await supabase
+      .from("org_nodes")
+      .delete()
+      .eq("id", node.id);
+    setBusy(false);
+    if (error) {
+      showToast(error.message, "error");
+      await refetch();
+      return;
+    }
+    showToast("Position deleted", "success");
+    await refetch();
+  }
+
   // Reposition any tile freely (sets pos_x/pos_y). Optimistic local update so
   // the tile doesn't snap back before the refetch settles.
   async function handleReposition(node: OrgNode, x: number, y: number) {
@@ -769,7 +923,11 @@ export function OrgChartCanvas({
                 renderPos={renderPos}
                 guardsByNode={guardsByNode}
                 photoUrls={photoUrls}
+                busy={busy}
                 onOpen={openEditor}
+                onAddChild={handleQuickAddChild}
+                onAddSibling={handleQuickAddSibling}
+                onDelete={handleQuickDelete}
               />
             </ZoomPanCanvas>
           )}
@@ -839,7 +997,11 @@ function ChartInner({
   renderPos,
   guardsByNode,
   photoUrls,
+  busy,
   onOpen,
+  onAddChild,
+  onAddSibling,
+  onDelete,
 }: {
   bounds: { w: number; h: number };
   connectors: Array<{ id: string; from: XY; to: XY }>;
@@ -847,7 +1009,11 @@ function ChartInner({
   renderPos: (n: OrgNode) => XY;
   guardsByNode: Map<string, Guard[]>;
   photoUrls: Record<string, string>;
+  busy: boolean;
   onOpen: (n: OrgNode) => void;
+  onAddChild: (n: OrgNode) => void;
+  onAddSibling: (n: OrgNode) => void;
+  onDelete: (n: OrgNode) => void;
 }) {
   return (
     <div style={{ position: "relative", width: bounds.w, height: bounds.h }}>
@@ -884,7 +1050,11 @@ function ChartInner({
           pos={renderPos(n)}
           guards={guardsByNode.get(n.id) ?? []}
           photoUrls={photoUrls}
+          busy={busy}
           onOpen={() => onOpen(n)}
+          onAddChild={onAddChild}
+          onAddSibling={onAddSibling}
+          onDelete={onDelete}
         />
       ))}
     </div>
@@ -1173,16 +1343,27 @@ function NodeTile({
   pos,
   guards,
   photoUrls,
+  busy,
   onOpen,
+  onAddChild,
+  onAddSibling,
+  onDelete,
 }: {
   node: OrgNode;
   pos: XY;
   guards: Guard[];
   photoUrls: Record<string, string>;
+  busy: boolean;
   onOpen: () => void;
+  onAddChild: (n: OrgNode) => void;
+  onAddSibling: (n: OrgNode) => void;
+  onDelete: (n: OrgNode) => void;
 }) {
   const draggable = useDraggable({ id: `${NODE_PREFIX}${node.id}` });
   const droppable = useDroppable({ id: `${NODE_PREFIX}${node.id}` });
+  // True while the pointer is over the tile OR keyboard focus is anywhere
+  // inside it — drives the fade-in of the quick-action buttons.
+  const [active, setActive] = useState(false);
 
   function setRef(el: HTMLDivElement | null) {
     draggable.setNodeRef(el);
@@ -1209,12 +1390,23 @@ function NodeTile({
       : "rgba(255, 255, 255, 0.10)";
 
   return (
+    // Outer wrapper owns positioning + drag/drop and does NOT clip, so the
+    // edge-overlapping action buttons aren't cut off. The inner card keeps the
+    // overflow:hidden needed for the photo column + rounded corners.
     <div
       ref={setRef}
       className="ga-tile"
       {...draggable.attributes}
       {...draggable.listeners}
       onClick={onOpen}
+      onMouseEnter={() => setActive(true)}
+      onMouseLeave={() => setActive(false)}
+      onFocus={() => setActive(true)}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          setActive(false);
+        }
+      }}
       title="Click to edit · drag to reposition"
       style={{
         position: "absolute",
@@ -1223,185 +1415,312 @@ function NodeTile({
         width: TILE_W,
         height: TILE_H,
         transform: t ? `translate3d(${t.x}px, ${t.y}px, 0)` : undefined,
-        zIndex: draggable.isDragging ? 40 : 1,
-        boxSizing: "border-box",
-        backgroundColor: positioned
-          ? "rgba(20, 18, 12, 0.96)"
-          : "rgba(255, 255, 255, 0.04)",
-        border: `1px solid ${borderColor}`,
-        borderTop: "2px solid #c9a961",
-        borderRadius: 10,
-        boxShadow: draggable.isDragging
-          ? "0 16px 40px rgba(0, 0, 0, 0.6)"
-          : droppable.isOver
-            ? "0 0 0 3px rgba(201, 169, 97, 0.18)"
-            : "0 6px 20px rgba(0, 0, 0, 0.3)",
+        // Lift the hovered/focused tile above its neighbours so the overflowing
+        // buttons sit on top of adjacent tiles.
+        zIndex: draggable.isDragging ? 40 : active ? 30 : 1,
         cursor: draggable.isDragging ? "grabbing" : "grab",
         opacity: draggable.isDragging ? 0.85 : 1,
         touchAction: "none",
-        display: "flex",
-        flexDirection: "row",
-        overflow: "hidden",
-        transition: draggable.isDragging
-          ? "none"
-          : "border-color 150ms ease-out, box-shadow 150ms ease-out",
       }}
     >
-      {/* Photo column (left) — full height, edge-to-edge */}
+      {/* Visual card (clipped) */}
       <div
         style={{
-          position: "relative",
-          width: PHOTO_W,
-          flexShrink: 0,
-          overflow: "hidden",
-          backgroundColor: "rgba(255, 255, 255, 0.03)",
-        }}
-      >
-        {guard ? (
-          <GuardPhotoBlock
-            name={guard.full_name}
-            photoUrl={photoUrls[guard.id] ?? null}
-          />
-        ) : (
-          <EmptyPhoto />
-        )}
-        {extra > 0 ? (
-          <span
-            className="tabular"
-            title={`${extra} more guard${extra === 1 ? "" : "s"} on this position`}
-            style={{
-              position: "absolute",
-              top: 6,
-              left: 6,
-              fontSize: 10,
-              fontWeight: 700,
-              padding: "2px 6px",
-              borderRadius: 999,
-              color: "#080b12",
-              backgroundColor: "rgba(245, 158, 11, 0.92)",
-            }}
-          >
-            +{extra}
-          </span>
-        ) : null}
-      </div>
-
-      {/* Info column (right) */}
-      <div
-        style={{
-          flex: 1,
-          minWidth: 0,
-          padding: 14,
+          width: "100%",
+          height: "100%",
+          boxSizing: "border-box",
+          backgroundColor: positioned
+            ? "rgba(20, 18, 12, 0.96)"
+            : "rgba(255, 255, 255, 0.04)",
+          border: `1px solid ${borderColor}`,
+          borderTop: "2px solid #c9a961",
+          borderRadius: 10,
+          boxShadow: draggable.isDragging
+            ? "0 16px 40px rgba(0, 0, 0, 0.6)"
+            : droppable.isOver
+              ? "0 0 0 3px rgba(201, 169, 97, 0.18)"
+              : "0 6px 20px rgba(0, 0, 0, 0.3)",
           display: "flex",
-          flexDirection: "column",
-          gap: 3,
+          flexDirection: "row",
+          overflow: "hidden",
+          transition: draggable.isDragging
+            ? "none"
+            : "border-color 150ms ease-out, box-shadow 150ms ease-out",
         }}
       >
-        {guard ? (
-          <>
-            <div
+        {/* Photo column (left) — full height, edge-to-edge */}
+        <div
+          style={{
+            position: "relative",
+            width: PHOTO_W,
+            flexShrink: 0,
+            overflow: "hidden",
+            backgroundColor: "rgba(255, 255, 255, 0.03)",
+          }}
+        >
+          {guard ? (
+            <GuardPhotoBlock
+              name={guard.full_name}
+              photoUrl={photoUrls[guard.id] ?? null}
+            />
+          ) : (
+            <EmptyPhoto />
+          )}
+          {extra > 0 ? (
+            <span
+              className="tabular"
+              title={`${extra} more guard${extra === 1 ? "" : "s"} on this position`}
               style={{
-                fontSize: 15,
-                fontWeight: 500,
-                color: "#f5f5f7",
-                letterSpacing: "-0.01em",
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
+                position: "absolute",
+                top: 6,
+                left: 6,
+                fontSize: 10,
+                fontWeight: 700,
+                padding: "2px 6px",
+                borderRadius: 999,
+                color: "#080b12",
+                backgroundColor: "rgba(245, 158, 11, 0.92)",
               }}
             >
-              {guard.full_name}
-            </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: "rgba(245, 245, 247, 0.55)",
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {node.label}
-            </div>
-            {showExpiry ? (
-              <span
-                style={{
-                  alignSelf: "flex-start",
-                  fontSize: 10,
-                  fontWeight: 600,
-                  padding: "1px 6px",
-                  borderRadius: 4,
-                  color: ALERT_ACCENT[expiryStatus].fg,
-                  backgroundColor: ALERT_ACCENT[expiryStatus].bg,
-                  border: `1px solid ${ALERT_ACCENT[expiryStatus].border}`,
-                }}
-              >
-                {days! < 0 ? "License expired" : `Expires in ${days}d`}
-              </span>
-            ) : (
+              +{extra}
+            </span>
+          ) : null}
+        </div>
+
+        {/* Info column (right) */}
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            padding: 14,
+            display: "flex",
+            flexDirection: "column",
+            gap: 3,
+          }}
+        >
+          {guard ? (
+            <>
               <div
-                className="tabular"
                 style={{
-                  fontSize: 11,
-                  color: "rgba(245, 245, 247, 0.45)",
+                  fontSize: 15,
+                  fontWeight: 500,
+                  color: "#f5f5f7",
+                  letterSpacing: "-0.01em",
                   whiteSpace: "nowrap",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                 }}
               >
-                {guard.license_no ?? "No license"}
+                {guard.full_name}
               </div>
-            )}
-            <div style={{ marginTop: "auto", paddingTop: 4 }}>
-              <GuardStatusBadge status={guard.status} />
-            </div>
-          </>
-        ) : (
-          <>
-            <div
-              style={{
-                fontSize: 13,
-                fontWeight: 500,
-                color: "#f5f5f7",
-                letterSpacing: "-0.01em",
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {node.label}
-            </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: "rgba(245, 245, 247, 0.35)",
-                lineHeight: 1.4,
-              }}
-            >
-              Drop a guard here, or click to assign
-            </div>
-          </>
-        )}
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "rgba(245, 245, 247, 0.55)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {node.label}
+              </div>
+              {showExpiry ? (
+                <span
+                  style={{
+                    alignSelf: "flex-start",
+                    fontSize: 10,
+                    fontWeight: 600,
+                    padding: "1px 6px",
+                    borderRadius: 4,
+                    color: ALERT_ACCENT[expiryStatus].fg,
+                    backgroundColor: ALERT_ACCENT[expiryStatus].bg,
+                    border: `1px solid ${ALERT_ACCENT[expiryStatus].border}`,
+                  }}
+                >
+                  {days! < 0 ? "License expired" : `Expires in ${days}d`}
+                </span>
+              ) : (
+                <div
+                  className="tabular"
+                  style={{
+                    fontSize: 11,
+                    color: "rgba(245, 245, 247, 0.45)",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {guard.license_no ?? "No license"}
+                </div>
+              )}
+              <div style={{ marginTop: "auto", paddingTop: 4 }}>
+                <GuardStatusBadge status={guard.status} />
+              </div>
+            </>
+          ) : (
+            <>
+              <div
+                style={{
+                  fontSize: 13,
+                  fontWeight: 500,
+                  color: "#f5f5f7",
+                  letterSpacing: "-0.01em",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {node.label}
+              </div>
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "rgba(245, 245, 247, 0.35)",
+                  lineHeight: 1.4,
+                }}
+              >
+                Drop a guard here, or click to assign
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Manually-positioned indicator — top-right corner. Hidden while the
+            tile is active because the delete button takes that corner. */}
+        {positioned && !active ? (
+          <span
+            title="Manually positioned"
+            aria-hidden
+            style={{
+              position: "absolute",
+              top: 8,
+              right: 8,
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              backgroundColor: "#d4b670",
+              boxShadow: "0 0 0 2px rgba(8, 11, 18, 0.6)",
+            }}
+          />
+        ) : null}
       </div>
 
-      {/* Manually-positioned indicator — top-right corner (info side) */}
-      {positioned ? (
-        <span
-          title="Manually positioned"
-          aria-hidden
-          style={{
-            position: "absolute",
-            top: 8,
-            right: 8,
-            width: 8,
-            height: 8,
-            borderRadius: "50%",
-            backgroundColor: "#d4b670",
-            boxShadow: "0 0 0 2px rgba(8, 11, 18, 0.6)",
-          }}
-        />
-      ) : null}
+      {/* Quick-action affordances — fade in on hover/focus. They stop their own
+          pointer/click events so they never start a drag or open the modal. */}
+      <TileActionButton
+        active={active}
+        disabled={busy}
+        danger
+        ariaLabel="Delete position"
+        onClick={() => onDelete(node)}
+        style={{ top: -10, right: -10 }}
+      >
+        ×
+      </TileActionButton>
+      <TileActionButton
+        active={active}
+        disabled={busy}
+        ariaLabel="Add sibling position"
+        onClick={() => onAddSibling(node)}
+        style={{ top: "50%", right: -12, transform: "translateY(-50%)" }}
+      >
+        +
+      </TileActionButton>
+      <TileActionButton
+        active={active}
+        disabled={busy}
+        ariaLabel="Add child position"
+        onClick={() => onAddChild(node)}
+        style={{ bottom: -12, left: "50%", transform: "translateX(-50%)" }}
+      >
+        +
+      </TileActionButton>
     </div>
+  );
+}
+
+// Small circular hover button anchored to a tile edge. `active` controls the
+// fade (opacity + pointer-events) so the buttons only intercept clicks once the
+// tile is hovered/focused. Keyboard focus still reaches them (focus ignores
+// pointer-events), which flips the parent tile to active via focus bubbling.
+function TileActionButton({
+  active,
+  disabled,
+  danger,
+  ariaLabel,
+  onClick,
+  style,
+  children,
+}: {
+  active: boolean;
+  disabled: boolean;
+  danger?: boolean;
+  ariaLabel: string;
+  onClick: () => void;
+  style: CSSProperties;
+  children: ReactNode;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label={ariaLabel}
+      title={ariaLabel}
+      disabled={disabled}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!disabled) onClick();
+      }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        position: "absolute",
+        width: 24,
+        height: 24,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: "50%",
+        padding: 0,
+        lineHeight: 1,
+        fontSize: 16,
+        fontWeight: 600,
+        fontFamily: "inherit",
+        cursor: disabled ? "not-allowed" : "pointer",
+        background: danger
+          ? hover
+            ? "rgba(239, 68, 68, 0.92)"
+            : "rgba(8, 11, 18, 0.92)"
+          : hover
+            ? "rgba(201, 169, 97, 0.18)"
+            : "rgba(8, 11, 18, 0.92)",
+        border: `1px solid ${
+          danger
+            ? hover
+              ? "rgba(239, 68, 68, 0.9)"
+              : "rgba(255, 255, 255, 0.18)"
+            : hover
+              ? "rgba(201, 169, 97, 0.55)"
+              : "rgba(255, 255, 255, 0.18)"
+        }`,
+        color: danger
+          ? hover
+            ? "#ffffff"
+            : "rgba(239, 68, 68, 0.9)"
+          : hover
+            ? "#d4b670"
+            : "rgba(245, 245, 247, 0.85)",
+        boxShadow: "0 2px 8px rgba(0, 0, 0, 0.45)",
+        opacity: active ? (disabled ? 0.5 : 1) : 0,
+        pointerEvents: active ? "auto" : "none",
+        transition:
+          "opacity 150ms ease-out, color 150ms ease-out, background-color 150ms ease-out, border-color 150ms ease-out",
+        ...style,
+      }}
+    >
+      {children}
+    </button>
   );
 }
 
